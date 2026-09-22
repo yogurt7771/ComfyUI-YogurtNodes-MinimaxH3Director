@@ -1,0 +1,14 @@
+[project]
+name = "comfyui-yogurtnodes-minimaxh3director"
+version = "0.3.0"
+description = "MiniMax H3 long video for ComfyUI: character replacement and multi-segment stories on one sampler with direct AV-latent continuation"
+readme = "README.md"
+license = {file = "LICENSE"}
+requires-python = ">=3.10"
+dependencies = []
+keywords = ["comfyui", "minimax-h3", "character-replacement", "long-video", "story"]
+
+[tool.comfy]
+PublisherId = "yogurt"
+DisplayName = "Yogurt MiniMax H3 Director"
+Icon = ""
