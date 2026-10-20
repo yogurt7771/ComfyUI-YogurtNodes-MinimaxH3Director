@@ -47,6 +47,24 @@ class WindowTests(unittest.TestCase):
         self.assertFalse(windows[1].carry)
         self.assertEqual(windows[1].shot["audio"], "source")
 
+    def test_global_references_come_first_and_can_be_switched_off(self):
+        image = lambda name: {"filename": name}
+        data = build({"frames": 40, "refs": {"images": [image("own.png")]}},
+                     {"frames": 40, "inherit_refs": False, "refs": {"images": [image("solo.png")]}},
+                     {"frames": 40},
+                     refs={"images": [image("hero.png"), image("cafe.png")], "audios": [image("voice.wav")]})
+        a, b, c = data["shots"]
+        self.assertEqual([m["filename"] for m in a["refs"]["images"]], ["hero.png", "cafe.png", "own.png"])
+        self.assertEqual(a["global_refs"], {"images": 2, "videos": 0, "audios": 1})
+        self.assertEqual([m["filename"] for m in b["refs"]["images"]], ["solo.png"])
+        self.assertEqual(b["global_refs"], {"images": 0, "videos": 0, "audios": 0})
+        self.assertEqual(len(c["refs"]["audios"]), 1)
+        self.assertTrue(a["inherit_prompt"])
+
+    def test_references_beyond_the_ui_limit_are_kept(self):
+        shot = build({"frames": 40, "refs": {"images": [{"filename": f"{i}.png"} for i in range(11)]}})["shots"][0]
+        self.assertEqual(len(shot["refs"]["images"]), 11)
+
     def test_overlap_snaps_down_to_the_latent_grid(self):
         self.assertEqual(build({"frames": 10}, overlap=30)["overlap"], 22)
         self.assertEqual(build({"frames": 10}, overlap=4)["overlap"], 0)

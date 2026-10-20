@@ -1,8 +1,8 @@
 """Story -> per-segment H3 prompts, written by a deepagents agent with MiniMax's h3-prompt-writing skill.
 
 The agent receives the director timeline as it will be generated (segment lengths, continuations,
-keyframe positions, reference labels, sound) plus the story, and returns one complete H3 prompt per
-segment. Prompts are cached per segment: a segment is rewritten only when its own inputs, the story or,
+keyframe positions, reference labels, sound) plus the global prompt, and returns one complete H3 prompt per
+segment. Prompts are cached per segment: a segment is rewritten only when its own inputs, the global prompt or,
 for a continued segment, the previous segment's prompt change; the other segments stay as they are.
 """
 
@@ -34,9 +34,12 @@ Use the `h3-prompt-writing` skill. Read its SKILL.md, then the guide for each se
 (references/base-en.txt for T2VA, I2VA, FL2VA and L2VA; references/ref-en.txt for Ref2VA), and write every \
 prompt in exactly the final structure that guide specifies.
 
-Plan before writing: give each segment one beat of the story in order, sized to the segment length, so the \
-film tells the story once without repeating or skipping events. User notes for a segment take priority over \
-the story for that segment. Segments marked fixed are already written; keep the film consistent with them.
+The global prompt describes the whole film: story, characters, style, setting. It is background, not text \
+to copy into a segment. Plan before writing: give each segment one beat of it in order, sized to the segment \
+length, so the film tells the story once without repeating or skipping events. A segment prompt directs only \
+that segment and takes priority there. A segment marked as not using the global prompt is written from its own \
+segment prompt and timeline facts alone. Segments marked fixed are already written; keep the film consistent \
+with them.
 
 H3 never sees the other segments' prompts. Restate the visual style, every character's appearance and \
 clothing, the setting and the lighting in each prompt, worded consistently across segments.
@@ -125,19 +128,24 @@ def labels(window):
     shot = window.shot
     refs = shot["refs"]
     if refs["images"] or refs["videos"] or refs["audios"] or (shot["source"] and shot["source"]["regen"]):
-        out = [(f"<Picture {i + 1}>", "reference image", m) for i, m in enumerate(refs["images"])]
+        shared = shot["global_refs"]
+
+        def scope(kind, i):
+            return f"global reference {kind}, the same in every segment" if i < shared[kind + "s"] else f"reference {kind}"
+
+        out = [(f"<Picture {i + 1}>", scope("image", i), m) for i, m in enumerate(refs["images"])]
         videos = ([("the source video this segment rewrites; keep its motion, framing and timing", shot["source"]["media"], False)]
                   if shot["source"] and shot["source"]["regen"] else [])
-        videos += [("reference video", v["media"], v["audio"]) for v in refs["videos"]]
+        videos += [(scope("video", i), v["media"], v["audio"]) for i, v in enumerate(refs["videos"])]
         audio = 0
         for k, (text, item, with_audio) in enumerate(videos, 1):
             if with_audio:
                 audio += 1
                 out.append((f"<Audio {audio}>", f"soundtrack of <Video {k}>", None))
             out.append((f"<Video {k}>", text, item))
-        for item in refs["audios"]:
+        for i in range(len(refs["audios"])):
             audio += 1
-            out.append((f"<Audio {audio}>", "reference audio", None))
+            out.append((f"<Audio {audio}>", scope("audio", i), None))
         return "Ref2VA", out
     frames = {window.frame(k["at"]): k["media"] for k in shot["keyframes"]}
     first, last = frames.get(0), frames.get(window.gen - 1)
@@ -171,7 +179,11 @@ def brief(window):
              "source": "locked to the source video's original audio; keep the sound fields brief.",
              "silent": "silent; write `overall_soundscape: Silence.` and `non_diegetic_music: None.`"}[shot["audio"]]
     lines.append(f"- Sound: {sound}")
-    lines.append(f"- User notes: {shot['prompt'].strip() or '(none — derive this segment from the story)'}")
+    if shot["inherit_prompt"]:
+        lines.append(f"- Segment prompt: {shot['prompt'].strip() or '(none — derive this segment from the global prompt)'}")
+    else:
+        lines.append("- Does not use the global prompt: write this segment only from its segment prompt and the facts above.")
+        lines.append(f"- Segment prompt: {shot['prompt'].strip() or '(none)'}")
     return "\n".join(lines)
 
 
@@ -221,7 +233,8 @@ def _segment_key(window, project, config, skill, media, previous):
     if shot["source"]:
         items.append(shot["source"]["media"])
     model = {k: v for k, v in config.items() if k != "api_key"}
-    return digest([VERSION, model, skill, project["story"], project["rewrite"]["notes"], project["rewrite"]["seed"],
+    shared = [project["story"], project["rewrite"]["notes"]] if shot["inherit_prompt"] else None
+    return digest([VERSION, model, skill, shared, project["rewrite"]["seed"],
                    project["width"], project["height"], {**shot, "repaints": None, "details": None},
                    [_identity(media, m) for m in items], window.head, window.gen, window.carry, previous])
 
@@ -273,9 +286,9 @@ def _message(project, windows, targets, prompts, config, media):
 
     target_ids = {w.shot["id"] for w in targets}
     total = sum(w.keep for w in windows)
-    text = [f"# Story\n{project['story'].strip() or '(not given — build the film from the segment notes)'}"]
+    text = [f"# Global prompt (the whole film)\n{project['story'].strip() or '(not given — build the film from the segment prompts)'}"]
     if project["rewrite"]["notes"].strip():
-        text.append(f"# Extra requirements\n{project['rewrite']['notes'].strip()}")
+        text.append(f"# Global requirements\n{project['rewrite']['notes'].strip()}")
     text.append(f"# Timeline\n{len(windows)} segments, {_seconds(total)} s of film, canvas {project['width']}x{project['height']}.")
     for window in windows:
         shot = window.shot

@@ -22,13 +22,14 @@ export function newShot(kind = "generate") {
         refs: { images: [], videos: [], audios: [] },
         source: kind === "source" ? { media: null, start: 0, regen: false, strength: 1 } : null,
         audio: kind === "source" ? "source" : "generate", repaints: [], details: [], refine: true, rewrite: true,
+        inherit_refs: true, inherit_prompt: true,
     };
 }
 
 export function newProject() {
     return {
         version: 1, width: 832, height: 480, overlap: 22, negative_prompt: "", ref_image_size: "match", soundtrack: null,
-        story: "", rewrite: { enabled: false, notes: "", seed: 0 },
+        refs: { images: [], videos: [], audios: [] }, story: "", rewrite: { enabled: false, notes: "", seed: 0 },
         refine: { enabled: false, scale: 1.5, upscaler: "lanczos", steps: 8, denoise: 0.35 }, detail: { steps: 8 },
         shots: [newShot()],
     };
@@ -37,7 +38,7 @@ export function newProject() {
 export function normalize(project) {
     const base = newProject();
     const out = { ...base, ...project, refine: { ...base.refine, ...(project?.refine || {}) }, detail: { ...base.detail, ...(project?.detail || {}) },
-        rewrite: { ...base.rewrite, ...(project?.rewrite || {}) } };
+        rewrite: { ...base.rewrite, ...(project?.rewrite || {}) }, refs: { ...base.refs, ...(project?.refs || {}) } };
     out.shots = (project?.shots || []).map(shot => {
         const fresh = newShot(shot.kind === "source" ? "source" : "generate");
         return { ...fresh, ...shot, refs: { ...fresh.refs, ...(shot.refs || {}) }, source: shot.kind === "source" ? { ...fresh.source, ...(shot.source || {}) } : null };
@@ -190,10 +191,22 @@ export function h(spec, attrs = {}, ...children) {
     return el;
 }
 
-export function features(shot) {
+/** References a shot is generated with: the global ones first (unless switched off), then its own; same as project.py. */
+export function effectiveRefs(project, shot) {
+    const shared = shot.inherit_refs === false ? { images: [], videos: [], audios: [] } : project.refs;
+    return {
+        images: [...shared.images, ...shot.refs.images], videos: [...shared.videos, ...shot.refs.videos],
+        audios: [...shared.audios, ...shot.refs.audios],
+        shared: { images: shared.images.length, videos: shared.videos.length, audios: shared.audios.length },
+    };
+}
+
+export const refCount = refs => refs.images.length + refs.videos.length + refs.audios.length;
+
+export function features(shot, project) {
     const marks = [];
     if (shot.keyframes.length) marks.push(shot.keyframes.some(k => k.at === -1) ? "首尾" : "关键帧");
-    const refs = shot.refs.images.length + shot.refs.videos.length + shot.refs.audios.length;
+    const refs = refCount(effectiveRefs(project, shot));
     if (refs) marks.push(`参考${refs}`);
     if (shot.repaints.length) marks.push(`重绘${shot.repaints.length}`);
     if (shot.details.length) marks.push(`精修${shot.details.length}`);

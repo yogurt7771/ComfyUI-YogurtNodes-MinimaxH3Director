@@ -95,7 +95,7 @@ class RewriteTests(unittest.TestCase):
         self.assertIn("Mode: I2VA", text)
         self.assertIn("<Picture 1>: the first frame, aligned at 0.00 s", text)
         self.assertIn("Continued: 0.00–0.92 s is the end of segment 1", text)
-        self.assertIn("User notes: 她回头微笑", text)
+        self.assertIn("Segment prompt: 她回头微笑", text)
         self.assertTrue(any(block.get("type") == "image_url" for block in human[1:]))
         skill = next(m for m in second if isinstance(m, ToolMessage))
         self.assertIn("H3 Prompt Writing", skill.content)
@@ -128,6 +128,25 @@ class RewriteTests(unittest.TestCase):
         self.assertNotIn("c", prompts)
         self.assertEqual(project["shots"][2]["prompt"], "Handwritten cafe prompt.")
         self.assertIn("(fixed, 2.33 s; do not rewrite)\nHandwritten cafe prompt.", self.model.seen[0][1].content[0]["text"])
+
+    def test_global_prompt_only_drives_inheriting_segments(self):
+        hero = {"filename": "first.png", "subfolder": "", "type": "input"}
+        project = self.project(c={"inherit_prompt": False, "prompt": "空镜：雨夜的霓虹招牌"})
+        project = director.project.load_project(json.dumps({**{k: v for k, v in project.items() if k != "shots"},
+                                                             "refs": {"images": [hero]},
+                                                             "shots": [{**s, "refs": {"images": [], "videos": [], "audios": []}} for s in project["shots"]]}))
+        self.model.replies = [answer([{"id": i, "prompt": f"v1 {i}"} for i in "abc"]), DONE]
+        self.run_rewrite(project)
+        text = self.model.seen[0][1].content[0]["text"]
+        segment_c = text.split("## Segment 3")[1]
+        self.assertIn("Does not use the global prompt", segment_c)
+        self.assertIn("<Picture 1>: global reference image, the same in every segment", text.split("## Segment 2")[1])
+
+        # Editing the global prompt rewrites the inheriting segments only.
+        project["story"] = "清晨的海边，一个穿红雨衣的女孩在散步。"
+        self.model.replies = [answer([{"id": "a", "prompt": "v2 a"}, {"id": "b", "prompt": "v2 b"}]), DONE]
+        _, prompts, _ = self.run_rewrite(project)
+        self.assertEqual(prompts, {"a": "v2 a", "b": "v2 b", "c": "v1 c"})
 
     def test_agent_is_told_what_is_missing_and_can_finish(self):
         self.model.replies = [answer([{"id": "a", "prompt": "pa"}]), answer([{"id": "b", "prompt": "pb"}, {"id": "c", "prompt": "pc"}]), DONE]

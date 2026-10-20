@@ -14,7 +14,6 @@ FPS = 24
 OVERLAPS = (0, 5, 22, 39, 56)
 MEDIA_TYPES = ("input", "output", "temp")
 AUDIO_MODES = ("generate", "soundtrack", "source", "silent")
-MAX_REF_IMAGES, MAX_REF_VIDEOS, MAX_REF_AUDIOS = 9, 3, 3
 
 DEFAULT_PROJECT = {
     "version": 1,
@@ -24,6 +23,7 @@ DEFAULT_PROJECT = {
     "negative_prompt": "",
     "ref_image_size": "match",
     "soundtrack": None,
+    "refs": {"images": [], "videos": [], "audios": []},
     "story": "",
     "rewrite": {"enabled": False, "notes": "", "seed": 0},
     "refine": {"enabled": False, "scale": 1.5, "upscaler": "lanczos", "steps": 8, "denoise": 0.35},
@@ -82,18 +82,24 @@ def media(value):
     return {"filename": str(value["filename"]), "subfolder": str(value.get("subfolder") or ""), "type": kind}
 
 
-def _media_list(values, limit):
-    return [m for m in (media(v) for v in (values or [])) if m is not None][:limit]
+def _media_list(values):
+    return [m for m in (media(v) for v in (values or [])) if m is not None]
 
 
-def _shot(raw, index):
+def _refs(raw):
+    raw = raw or {}
+    videos = [{"media": media(item["media"]), "audio": bool(item.get("audio"))}
+              for item in raw.get("videos") or [] if isinstance(item, dict) and media(item.get("media"))]
+    return {"images": _media_list(raw.get("images")), "videos": videos, "audios": _media_list(raw.get("audios"))}
+
+
+def _shot(raw, index, global_refs):
     shot_id = str(raw.get("id") or f"shot{index + 1}")
     kind = "source" if raw.get("kind") == "source" else "generate"
-    refs = raw.get("refs") or {}
-    videos = []
-    for item in (refs.get("videos") or [])[:MAX_REF_VIDEOS]:
-        if isinstance(item, dict) and media(item.get("media")):
-            videos.append({"media": media(item["media"]), "audio": bool(item.get("audio"))})
+    # Global references come first in every inheriting shot, so their labels are the same in every shot.
+    inherit_refs = bool(raw.get("inherit_refs", True))
+    inherited = global_refs if inherit_refs else _refs(None)
+    own = _refs(raw.get("refs"))
     source = None
     if kind == "source":
         raw_source = raw.get("source") or {}
@@ -139,8 +145,10 @@ def _shot(raw, index):
         "continue": bool(raw.get("continue", True)),
         "seed": _int(raw.get("seed"), 0, 0, 2**31),
         "keyframes": keyframes,
-        "refs": {"images": _media_list(refs.get("images"), MAX_REF_IMAGES), "videos": videos,
-                 "audios": _media_list(refs.get("audios"), MAX_REF_AUDIOS)},
+        "refs": {kind: inherited[kind] + own[kind] for kind in own},
+        "global_refs": {kind: len(inherited[kind]) for kind in own},
+        "inherit_refs": inherit_refs,
+        "inherit_prompt": bool(raw.get("inherit_prompt", True)),
         "source": source,
         "audio": audio,
         "repaints": repaints,
@@ -167,14 +175,15 @@ def load_project(text):
         "negative_prompt": str(data.get("negative_prompt") or ""),
         "ref_image_size": "max" if data.get("ref_image_size") == "max" else "match",
         "soundtrack": media(data.get("soundtrack")),
+        "refs": _refs(data.get("refs")),
         "story": str(data.get("story") or ""),
         "rewrite": {"enabled": bool(rewrite["enabled"]), "notes": str(rewrite["notes"] or ""), "seed": _int(rewrite["seed"], 0, 0, 2**31)},
         "refine": {"enabled": bool(refine["enabled"]), "scale": _float(refine["scale"], 1.5, 1.0, 4.0),
                    "upscaler": "model" if refine["upscaler"] == "model" else "lanczos",
                    "steps": _int(refine["steps"], 8, 1, 200), "denoise": _float(refine["denoise"], 0.35, 0.05, 1.0)},
         "detail": {"steps": _int(detail["steps"], 8, 1, 200)},
-        "shots": [_shot(raw, i) for i, raw in enumerate(data.get("shots") or []) if isinstance(raw, dict)],
     }
+    project["shots"] = [_shot(raw, i, project["refs"]) for i, raw in enumerate(data.get("shots") or []) if isinstance(raw, dict)]
     if not project["shots"]:
         raise ValueError("导演台里还没有镜头：在时间线上添加至少一个镜头。")
     if any(s["audio"] == "soundtrack" for s in project["shots"]) and project["soundtrack"] is None:

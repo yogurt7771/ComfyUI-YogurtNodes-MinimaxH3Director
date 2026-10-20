@@ -80,6 +80,14 @@ class RenderTests(unittest.TestCase):
         self.assertEqual(frames, total)
         self.assertAlmostEqual(seconds, total / 24, delta=0.05)
 
+    def test_global_reference_turns_inheriting_shots_into_reference_shots(self):
+        hero = png(self.root / "input" / "hero.png", 90)
+        shots = [{"id": "a", "frames": 30, "prompt": "一"}, {"id": "b", "frames": 30, "prompt": "二", "continue": False, "inherit_refs": False}]
+        self.run_project({"shots": shots, "refs": {"images": [hero]}}, ref_model="ref_model")
+        a, b = self.fake.calls
+        self.assertEqual((a["model"], a["refs"]), ("ref_model", ["image"]))
+        self.assertEqual((b["model"], b["refs"]), ("model", []))
+
     def test_cache_reuses_unchanged_shots_and_reruns_dependents(self):
         shots = [{"id": "a", "frames": 30, "prompt": "一"}, {"id": "b", "frames": 30, "prompt": "二"},
                  {"id": "c", "frames": 30, "prompt": "三", "continue": False}]

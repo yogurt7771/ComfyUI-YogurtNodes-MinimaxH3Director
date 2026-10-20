@@ -77,7 +77,7 @@ class Panel {
                 onclick: () => this.select(w.index), ondblclick: () => this.open(w.index),
             }, windows[w.index + 1]?.head ? h("i.carry", { style: { width: `${Math.min(100, 100 * windows[w.index + 1].head / w.keep)}%` } }) : null, h("i.state"),
                 h("b", {}, `${w.index + 1} · ${secs(w.keep)}`),
-                h("small", {}, state && state !== "complete" ? STAGES[state] || state : features(w.shot).join(" ") || (w.shot.kind === "source" ? "源视频" : "生成")));
+                h("small", {}, state && state !== "complete" ? STAGES[state] || state : features(w.shot, project).join(" ") || (w.shot.kind === "source" ? "源视频" : "生成")));
         }));
         const shot = project.shots[this.selected], w = windows[this.selected];
         const seconds = h("input", {
