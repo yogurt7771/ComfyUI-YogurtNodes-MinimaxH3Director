@@ -40,6 +40,15 @@
 
 示例工作流：[example_workflows/yogurt_h3_director.json](example_workflows/yogurt_h3_director.json)。模型和素材需选择本机文件，插件不下载任何内容。
 
+示例默认开启 Turbo 8 步，使用 [lightx2v/Minimax-h3-Turbo](https://huggingface.co/lightx2v/Minimax-h3-Turbo) 的 768p 加速 LoRA，需放到 `models/loras/`：
+
+| 分支 | LoRA | 采样设置 |
+| --- | --- | --- |
+| fl2va → `model` | `minimax_h3_fl2v_turbo_8step_v1.1_768p_comfyui_bf16.safetensors` | 后接 ModelSamplingMiniMaxH3，shift 6 / 3 |
+| ref2va → `ref_model` | `minimax_h3_ref2v_turbo_8step_v1.1_768p_comfyui_bf16.safetensors` | 不加 shift 节点（默认 12 / 3） |
+
+导演台 `steps` 8、`euler`、`simple`、`cfg` 1；画幅 1344×768（LoRA 训练尺寸，更低分辨率下 768p LoRA 效果会变差）；二采与精修 3 步。两个模型共用 `steps`，换 4 步时两个 LoRA 一起换成 4 步版（fl2v v1.3 / ref2v v1.0）。不用加速时把两个 LoRA 和 shift 节点旁路，`steps` 改回 25、采样器 `res_multistep`。
+
 ## 使用
 
 1. 导入示例，选择本机模型。
