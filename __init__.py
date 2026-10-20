@@ -1,64 +1,39 @@
-"""Yogurt MiniMax H3 long-video nodes: character replacement and multi-segment stories on one sampler."""
+"""Yogurt MiniMax H3 Director: a visual timeline director that renders finished MiniMax H3 videos."""
 
-from .nodes import (
-    YogurtH3BuildCharacterReplacePrompt,
-    YogurtH3CharacterReplacePlanner,
-    YogurtH3ExtractCharacterReplaceSegment,
-    YogurtH3RoleAnalysisInstructions,
-    YogurtH3TrimCharacterReplaceOutput,
-    YogurtH3OriginalAudio,
-)
-from .render import (
-    YogurtH3CachedSegment,
-    YogurtH3Continuation,
-    YogurtH3EncodeSegment,
-    YogurtH3FreshNoise,
-    YogurtH3JoinSegments,
-    YogurtH3LongVideoSampler,
-    YogurtH3RefineSettings,
-    YogurtH3SaveSegment,
-)
-from .rewriter import YogurtH3PromptRewriter
-from .timeline import register_routes
-from .references import YogurtH3ReferenceMedia, YogurtH3DirectorConditioning
-from .story import NODES as STORY_NODES
+import asyncio
+
+from aiohttp import web
+from server import PromptServer
+
+from .detail import detectors
+from .director import YogurtH3Director
+from .media import Media
+from .project import load_project
+from .rewrite import YogurtH3RewriteModel, rewrite_project, rewriter_config
 
 WEB_DIRECTORY = "./web"
-register_routes()
 
+NODE_CLASS_MAPPINGS = {"YogurtH3Director": YogurtH3Director, "YogurtH3RewriteModel": YogurtH3RewriteModel}
+NODE_DISPLAY_NAME_MAPPINGS = {"YogurtH3Director": "Yogurt H3 导演台", "YogurtH3RewriteModel": "Yogurt H3 改写模型"}
 
-NODE_CLASS_MAPPINGS = {
-    "YogurtH3FreshNoise": YogurtH3FreshNoise,
-    "YogurtH3ReferenceMedia": YogurtH3ReferenceMedia,
-    "YogurtH3DirectorConditioning": YogurtH3DirectorConditioning,
-    "YogurtH3LongVideoSampler": YogurtH3LongVideoSampler,
-    "YogurtH3CachedSegment": YogurtH3CachedSegment,
-    "YogurtH3EncodeSegment": YogurtH3EncodeSegment,
-    "YogurtH3Continuation": YogurtH3Continuation,
-    "YogurtH3SaveSegment": YogurtH3SaveSegment,
-    "YogurtH3JoinSegments": YogurtH3JoinSegments,
-    "YogurtH3RefineSettings": YogurtH3RefineSettings,
-    "YogurtH3PromptRewriter": YogurtH3PromptRewriter,
-    "YogurtH3RoleAnalysisInstructions": YogurtH3RoleAnalysisInstructions,
-    "YogurtH3BuildCharacterReplacePrompt": YogurtH3BuildCharacterReplacePrompt,
-    "YogurtH3CharacterReplacePlanner": YogurtH3CharacterReplacePlanner,
-    "YogurtH3ExtractCharacterReplaceSegment": YogurtH3ExtractCharacterReplaceSegment,
-    "YogurtH3TrimCharacterReplaceOutput": YogurtH3TrimCharacterReplaceOutput,
-    "YogurtH3OriginalAudio": YogurtH3OriginalAudio,
-}
-NODE_CLASS_MAPPINGS.update({node.GET_SCHEMA().node_id: node for node in STORY_NODES})
+if getattr(PromptServer, "instance", None) is not None:
+    @PromptServer.instance.routes.get("/yogurt_h3/director/detectors")
+    async def list_detectors(request):
+        return web.json_response(detectors())
 
-NODE_DISPLAY_NAME_MAPPINGS = {
-    "YogurtH3ReferenceMedia": "Yogurt H3 多模态参考组",
-    "YogurtH3DirectorConditioning": "Yogurt H3 通用导演条件",
-    "YogurtH3LongVideoSampler": "Yogurt H3 长视频采样",
-    "YogurtH3RefineSettings": "Yogurt H3 精修与放大",
-    "YogurtH3PromptRewriter": "Yogurt H3 提示词改写",
-    "YogurtH3RoleAnalysisInstructions": "Yogurt H3 角色图识别指令",
-    "YogurtH3BuildCharacterReplacePrompt": "Yogurt H3 角色替换提示词",
-    "YogurtH3CharacterReplacePlanner": "Yogurt H3 长视频分段导演台",
-    "YogurtH3ExtractCharacterReplaceSegment": "Yogurt H3 提取源视频分段（内部）",
-    "YogurtH3TrimCharacterReplaceOutput": "Yogurt H3 精确裁剪输出（内部）",
-}
+    @PromptServer.instance.routes.post("/yogurt_h3/director/rewrite")
+    async def preview_rewrite(request):
+        """Rewrite the editor's project now, without queueing a render; results share the render's cache."""
+        data = await request.json()
 
-__all__ = ["NODE_CLASS_MAPPINGS", "NODE_DISPLAY_NAME_MAPPINGS"]
+        def work():
+            project = load_project(data["project"])
+            return rewrite_project(project, rewriter_config(**data["rewriter"]), Media())
+
+        try:
+            _, prompts, report = await asyncio.to_thread(work)
+        except Exception as error:  # surface provider and validation failures to the editor
+            return web.json_response({"error": f"{type(error).__name__}: {error}"}, status=400)
+        return web.json_response({"prompts": prompts, "report": report})
+
+__all__ = ["NODE_CLASS_MAPPINGS", "NODE_DISPLAY_NAME_MAPPINGS", "WEB_DIRECTORY"]

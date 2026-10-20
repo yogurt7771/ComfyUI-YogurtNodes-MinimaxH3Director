@@ -1,0 +1,769 @@
+{
+  "id": "d9ceadae-4923-4144-9469-db7206e25bf0",
+  "revision": 0,
+  "last_node_id": 10,
+  "last_link_id": 6,
+  "nodes": [
+    {
+      "id": 1,
+      "type": "MarkdownNote",
+      "pos": [
+        40,
+        -330
+      ],
+      "size": [
+        440,
+        330
+      ],
+      "flags": {},
+      "order": 0,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [],
+      "title": "使用说明",
+      "properties": {},
+      "widgets_values": [
+        "## Yogurt H3 导演台\n1. 选择本机模型：fl2va 接 `model`，ref2va 接 `ref_model`，CLIP 的 type 必须是 **minimax**。\n2. 点导演台上的 **打开导演台** 编排镜头：首尾帧、参考、局部重绘、局部精修、二采都在里面。\n3. 点 **▶ 运行**。成片保存到 `output/yogurt_h3/`，并在节点中预览。\n\n可选：\n- 改写模型 → `rewriter`：在“剧本”页写剧情并打开自动改写，deepagents 按分段自动写每一镜的 H3 提示词（需 pip install deepagents，模型需支持工具调用）。\n- Fun ControlNet → `inpaint_patch`：重绘区更贴合周围画面（修补、去除）。\n- 放大模型 → `upscale_model`：二采选“放大模型”时使用。\n- Turbo LoRA：在 UNET 与导演台之间加 LoraLoaderModelOnly，并把 steps 调到 LoRA 要求的步数。\n- 固定 seed 才能复用已生成的镜头；改哪个镜头只重跑哪个。"
+      ],
+      "widgets_values_named": {
+        "text": "## Yogurt H3 导演台\n1. 选择本机模型：fl2va 接 `model`，ref2va 接 `ref_model`，CLIP 的 type 必须是 **minimax**。\n2. 点导演台上的 **打开导演台** 编排镜头：首尾帧、参考、局部重绘、局部精修、二采都在里面。\n3. 点 **▶ 运行**。成片保存到 `output/yogurt_h3/`，并在节点中预览。\n\n可选：\n- 改写模型 → `rewriter`：在“剧本”页写剧情并打开自动改写，deepagents 按分段自动写每一镜的 H3 提示词（需 pip install deepagents，模型需支持工具调用）。\n- Fun ControlNet → `inpaint_patch`：重绘区更贴合周围画面（修补、去除）。\n- 放大模型 → `upscale_model`：二采选“放大模型”时使用。\n- Turbo LoRA：在 UNET 与导演台之间加 LoraLoaderModelOnly，并把 steps 调到 LoRA 要求的步数。\n- 固定 seed 才能复用已生成的镜头；改哪个镜头只重跑哪个。"
+      },
+      "color": "#432",
+      "bgcolor": "#653"
+    },
+    {
+      "id": 2,
+      "type": "UNETLoader",
+      "pos": [
+        40,
+        0
+      ],
+      "size": [
+        270,
+        82
+      ],
+      "flags": {},
+      "order": 1,
+      "mode": 0,
+      "inputs": [
+        {
+          "localized_name": "unet_name",
+          "name": "unet_name",
+          "type": "COMBO",
+          "widget": {
+            "name": "unet_name"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "weight_dtype",
+          "name": "weight_dtype",
+          "type": "COMBO",
+          "widget": {
+            "name": "weight_dtype"
+          },
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "localized_name": "MODEL",
+          "name": "MODEL",
+          "type": "MODEL",
+          "links": [
+            1
+          ]
+        }
+      ],
+      "title": "H3 fl2va（文生 / 首尾帧 / 重绘）",
+      "properties": {
+        "Node name for S&R": "UNETLoader"
+      },
+      "widgets_values": [
+        "minimax_h3_fl2va_pruned_int8_convrot.safetensors",
+        "default"
+      ],
+      "widgets_values_named": {
+        "unet_name": "minimax_h3_fl2va_pruned_int8_convrot.safetensors",
+        "weight_dtype": "default"
+      }
+    },
+    {
+      "id": 3,
+      "type": "UNETLoader",
+      "pos": [
+        40,
+        150
+      ],
+      "size": [
+        270,
+        82
+      ],
+      "flags": {},
+      "order": 2,
+      "mode": 0,
+      "inputs": [
+        {
+          "localized_name": "unet_name",
+          "name": "unet_name",
+          "type": "COMBO",
+          "widget": {
+            "name": "unet_name"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "weight_dtype",
+          "name": "weight_dtype",
+          "type": "COMBO",
+          "widget": {
+            "name": "weight_dtype"
+          },
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "localized_name": "MODEL",
+          "name": "MODEL",
+          "type": "MODEL",
+          "links": [
+            5
+          ]
+        }
+      ],
+      "title": "H3 ref2va（参考 / 源视频改写）",
+      "properties": {
+        "Node name for S&R": "UNETLoader"
+      },
+      "widgets_values": [
+        "minimax_h3_ref2va_pruned_int8_convrot.safetensors",
+        "default"
+      ],
+      "widgets_values_named": {
+        "unet_name": "minimax_h3_ref2va_pruned_int8_convrot.safetensors",
+        "weight_dtype": "default"
+      }
+    },
+    {
+      "id": 4,
+      "type": "CLIPLoader",
+      "pos": [
+        40,
+        300
+      ],
+      "size": [
+        270,
+        106
+      ],
+      "flags": {},
+      "order": 3,
+      "mode": 0,
+      "inputs": [
+        {
+          "localized_name": "clip_name",
+          "name": "clip_name",
+          "type": "COMBO",
+          "widget": {
+            "name": "clip_name"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "type",
+          "name": "type",
+          "type": "COMBO",
+          "widget": {
+            "name": "type"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "device",
+          "name": "device",
+          "shape": 7,
+          "type": "COMBO",
+          "widget": {
+            "name": "device"
+          },
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "localized_name": "CLIP",
+          "name": "CLIP",
+          "type": "CLIP",
+          "links": [
+            2
+          ]
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "CLIPLoader"
+      },
+      "widgets_values": [
+        "qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors",
+        "minimax",
+        "default"
+      ],
+      "widgets_values_named": {
+        "clip_name": "qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors",
+        "type": "minimax",
+        "device": "default"
+      }
+    },
+    {
+      "id": 5,
+      "type": "VAELoader",
+      "pos": [
+        40,
+        470
+      ],
+      "size": [
+        270,
+        58
+      ],
+      "flags": {},
+      "order": 4,
+      "mode": 0,
+      "inputs": [
+        {
+          "localized_name": "vae_name",
+          "name": "vae_name",
+          "type": "COMBO",
+          "widget": {
+            "name": "vae_name"
+          },
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "localized_name": "VAE",
+          "name": "VAE",
+          "type": "VAE",
+          "links": [
+            3
+          ]
+        }
+      ],
+      "title": "H3 视频 VAE",
+      "properties": {
+        "Node name for S&R": "VAELoader"
+      },
+      "widgets_values": [
+        "minimax_h3_video_vae_fp16.safetensors"
+      ],
+      "widgets_values_named": {
+        "vae_name": "minimax_h3_video_vae_fp16.safetensors"
+      }
+    },
+    {
+      "id": 6,
+      "type": "VAELoader",
+      "pos": [
+        40,
+        580
+      ],
+      "size": [
+        270,
+        58
+      ],
+      "flags": {},
+      "order": 5,
+      "mode": 0,
+      "inputs": [
+        {
+          "localized_name": "vae_name",
+          "name": "vae_name",
+          "type": "COMBO",
+          "widget": {
+            "name": "vae_name"
+          },
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "localized_name": "VAE",
+          "name": "VAE",
+          "type": "VAE",
+          "links": [
+            4
+          ]
+        }
+      ],
+      "title": "H3 音频 VAE",
+      "properties": {
+        "Node name for S&R": "VAELoader"
+      },
+      "widgets_values": [
+        "minimax_h3_audio_vae_fp32.safetensors"
+      ],
+      "widgets_values_named": {
+        "vae_name": "minimax_h3_audio_vae_fp32.safetensors"
+      }
+    },
+    {
+      "id": 7,
+      "type": "ModelPatchLoader",
+      "pos": [
+        40,
+        700
+      ],
+      "size": [
+        306.2623046875,
+        58
+      ],
+      "flags": {},
+      "order": 6,
+      "mode": 0,
+      "inputs": [
+        {
+          "localized_name": "name",
+          "name": "name",
+          "type": "COMBO",
+          "widget": {
+            "name": "name"
+          },
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "localized_name": "MODEL_PATCH",
+          "name": "MODEL_PATCH",
+          "type": "MODEL_PATCH",
+          "links": null
+        }
+      ],
+      "title": "（可选）Fun ControlNet → inpaint_patch",
+      "properties": {
+        "Node name for S&R": "ModelPatchLoader"
+      },
+      "widgets_values": [
+        "minimax_h3_fun_controlnet_union_2.0_pruned_bf16.safetensors"
+      ],
+      "widgets_values_named": {
+        "name": "minimax_h3_fun_controlnet_union_2.0_pruned_bf16.safetensors"
+      }
+    },
+    {
+      "id": 8,
+      "type": "UpscaleModelLoader",
+      "pos": [
+        40,
+        810
+      ],
+      "size": [
+        273.2037109375,
+        58
+      ],
+      "flags": {},
+      "order": 7,
+      "mode": 0,
+      "inputs": [
+        {
+          "localized_name": "model_name",
+          "name": "model_name",
+          "type": "COMBO",
+          "widget": {
+            "name": "model_name"
+          },
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "localized_name": "UPSCALE_MODEL",
+          "name": "UPSCALE_MODEL",
+          "type": "UPSCALE_MODEL",
+          "links": null
+        }
+      ],
+      "title": "（可选）放大模型 → upscale_model",
+      "properties": {
+        "Node name for S&R": "UpscaleModelLoader"
+      },
+      "widgets_values": [
+        "4x-UltraSharp.pth"
+      ],
+      "widgets_values_named": {
+        "model_name": "4x-UltraSharp.pth"
+      }
+    },
+    {
+      "id": 9,
+      "type": "YogurtH3Director",
+      "pos": [
+        500,
+        0
+      ],
+      "size": [
+        564,
+        696
+      ],
+      "flags": {},
+      "order": 9,
+      "mode": 0,
+      "inputs": [
+        {
+          "localized_name": "model",
+          "name": "model",
+          "type": "MODEL",
+          "link": 1
+        },
+        {
+          "localized_name": "clip",
+          "name": "clip",
+          "type": "CLIP",
+          "link": 2
+        },
+        {
+          "localized_name": "vae",
+          "name": "vae",
+          "type": "VAE",
+          "link": 3
+        },
+        {
+          "localized_name": "audio_vae",
+          "name": "audio_vae",
+          "type": "VAE",
+          "link": 4
+        },
+        {
+          "localized_name": "ref_model",
+          "name": "ref_model",
+          "shape": 7,
+          "type": "MODEL",
+          "link": 5
+        },
+        {
+          "localized_name": "refine_model",
+          "name": "refine_model",
+          "shape": 7,
+          "type": "MODEL",
+          "link": null
+        },
+        {
+          "localized_name": "rewriter",
+          "name": "rewriter",
+          "shape": 7,
+          "type": "YOGURT_H3_REWRITER",
+          "link": 6
+        },
+        {
+          "localized_name": "inpaint_patch",
+          "name": "inpaint_patch",
+          "shape": 7,
+          "type": "MODEL_PATCH",
+          "link": null
+        },
+        {
+          "localized_name": "upscale_model",
+          "name": "upscale_model",
+          "shape": 7,
+          "type": "UPSCALE_MODEL",
+          "link": null
+        },
+        {
+          "localized_name": "sampler",
+          "name": "sampler",
+          "shape": 7,
+          "type": "SAMPLER",
+          "link": null
+        },
+        {
+          "localized_name": "sigmas",
+          "name": "sigmas",
+          "shape": 7,
+          "type": "SIGMAS",
+          "link": null
+        },
+        {
+          "localized_name": "image_0",
+          "name": "images.image_0",
+          "shape": 7,
+          "type": "IMAGE",
+          "link": null
+        },
+        {
+          "localized_name": "mask_0",
+          "name": "masks.mask_0",
+          "shape": 7,
+          "type": "MASK",
+          "link": null
+        },
+        {
+          "localized_name": "seed",
+          "name": "seed",
+          "type": "INT",
+          "widget": {
+            "name": "seed"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "steps",
+          "name": "steps",
+          "type": "INT",
+          "widget": {
+            "name": "steps"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "cfg",
+          "name": "cfg",
+          "type": "FLOAT",
+          "widget": {
+            "name": "cfg"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "sampler_name",
+          "name": "sampler_name",
+          "type": "COMBO",
+          "widget": {
+            "name": "sampler_name"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "scheduler",
+          "name": "scheduler",
+          "type": "COMBO",
+          "widget": {
+            "name": "scheduler"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "filename_prefix",
+          "name": "filename_prefix",
+          "type": "STRING",
+          "widget": {
+            "name": "filename_prefix"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "project",
+          "name": "project",
+          "type": "STRING",
+          "widget": {
+            "name": "project"
+          },
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "localized_name": "video",
+          "name": "video",
+          "type": "VIDEO",
+          "links": null
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "YogurtH3Director"
+      },
+      "widgets_values": [
+        0,
+        "fixed",
+        25,
+        1,
+        "res_multistep",
+        "simple",
+        "yogurt_h3/director",
+        "{\"version\":1,\"width\":832,\"height\":480,\"overlap\":22,\"negative_prompt\":\"\",\"ref_image_size\":\"match\",\"soundtrack\":null,\"refine\":{\"enabled\":false,\"scale\":1.5,\"upscaler\":\"lanczos\",\"steps\":8,\"denoise\":0.35},\"detail\":{\"steps\":8},\"shots\":[{\"id\":\"open\",\"kind\":\"generate\",\"frames\":120,\"prompt\":\"A young woman with short black hair in a red raincoat walks along a rainy neon-lit street at night. The camera tracks beside her at shoulder height. Rain patters on the pavement and distant traffic hums.\",\"continue\":false,\"seed\":0,\"keyframes\":[],\"refs\":{\"images\":[],\"videos\":[],\"audios\":[]},\"source\":null,\"audio\":\"generate\",\"repaints\":[],\"details\":[],\"refine\":true},{\"id\":\"turn\",\"kind\":\"generate\",\"frames\":96,\"prompt\":\"She stops under a flickering sign, turns toward the camera and smiles softly. Neon reflections shimmer in the puddles while the rain keeps falling.\",\"continue\":true,\"seed\":0,\"keyframes\":[],\"refs\":{\"images\":[],\"videos\":[],\"audios\":[]},\"source\":null,\"audio\":\"generate\",\"repaints\":[],\"details\":[],\"refine\":true},{\"id\":\"cafe\",\"kind\":\"generate\",\"frames\":96,\"prompt\":\"Inside a warm, quiet cafe, the same young woman in the red raincoat sits by the window holding a cup of coffee and watches the rain outside. Soft jazz plays.\",\"continue\":false,\"seed\":0,\"keyframes\":[],\"refs\":{\"images\":[],\"videos\":[],\"audios\":[]},\"source\":null,\"audio\":\"generate\",\"repaints\":[],\"details\":[],\"refine\":true}],\"story\":\"雨夜，穿红雨衣的短发女孩独自走在霓虹街头。她在一块闪烁的招牌下停下，回头对镜头轻轻一笑。随后她走进一家温暖安静的咖啡馆，在窗边坐下，捧着咖啡看窗外的雨。\",\"rewrite\":{\"enabled\":false,\"notes\":\"写实电影感，镜头克制；台词（如果有）用中文。\",\"seed\":0}}"
+      ],
+      "widgets_values_named": {
+        "seed": 0,
+        "fixed": "fixed",
+        "steps": 25,
+        "cfg": 1,
+        "sampler_name": "res_multistep",
+        "scheduler": "simple",
+        "filename_prefix": "yogurt_h3/director",
+        "project": "{\"version\":1,\"width\":832,\"height\":480,\"overlap\":22,\"negative_prompt\":\"\",\"ref_image_size\":\"match\",\"soundtrack\":null,\"refine\":{\"enabled\":false,\"scale\":1.5,\"upscaler\":\"lanczos\",\"steps\":8,\"denoise\":0.35},\"detail\":{\"steps\":8},\"shots\":[{\"id\":\"open\",\"kind\":\"generate\",\"frames\":120,\"prompt\":\"A young woman with short black hair in a red raincoat walks along a rainy neon-lit street at night. The camera tracks beside her at shoulder height. Rain patters on the pavement and distant traffic hums.\",\"continue\":false,\"seed\":0,\"keyframes\":[],\"refs\":{\"images\":[],\"videos\":[],\"audios\":[]},\"source\":null,\"audio\":\"generate\",\"repaints\":[],\"details\":[],\"refine\":true},{\"id\":\"turn\",\"kind\":\"generate\",\"frames\":96,\"prompt\":\"She stops under a flickering sign, turns toward the camera and smiles softly. Neon reflections shimmer in the puddles while the rain keeps falling.\",\"continue\":true,\"seed\":0,\"keyframes\":[],\"refs\":{\"images\":[],\"videos\":[],\"audios\":[]},\"source\":null,\"audio\":\"generate\",\"repaints\":[],\"details\":[],\"refine\":true},{\"id\":\"cafe\",\"kind\":\"generate\",\"frames\":96,\"prompt\":\"Inside a warm, quiet cafe, the same young woman in the red raincoat sits by the window holding a cup of coffee and watches the rain outside. Soft jazz plays.\",\"continue\":false,\"seed\":0,\"keyframes\":[],\"refs\":{\"images\":[],\"videos\":[],\"audios\":[]},\"source\":null,\"audio\":\"generate\",\"repaints\":[],\"details\":[],\"refine\":true}],\"story\":\"雨夜，穿红雨衣的短发女孩独自走在霓虹街头。她在一块闪烁的招牌下停下，回头对镜头轻轻一笑。随后她走进一家温暖安静的咖啡馆，在窗边坐下，捧着咖啡看窗外的雨。\",\"rewrite\":{\"enabled\":false,\"notes\":\"写实电影感，镜头克制；台词（如果有）用中文。\",\"seed\":0}}"
+      }
+    },
+    {
+      "id": 10,
+      "type": "YogurtH3RewriteModel",
+      "pos": [
+        40,
+        920
+      ],
+      "size": [
+        363.18515625,
+        202
+      ],
+      "flags": {},
+      "order": 8,
+      "mode": 0,
+      "inputs": [
+        {
+          "localized_name": "provider",
+          "name": "provider",
+          "type": "COMBO",
+          "widget": {
+            "name": "provider"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "model",
+          "name": "model",
+          "type": "STRING",
+          "widget": {
+            "name": "model"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "base_url",
+          "name": "base_url",
+          "type": "STRING",
+          "widget": {
+            "name": "base_url"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "api_key",
+          "name": "api_key",
+          "type": "STRING",
+          "widget": {
+            "name": "api_key"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "temperature",
+          "name": "temperature",
+          "type": "FLOAT",
+          "widget": {
+            "name": "temperature"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "max_tokens",
+          "name": "max_tokens",
+          "type": "INT",
+          "widget": {
+            "name": "max_tokens"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "vision",
+          "name": "vision",
+          "type": "BOOLEAN",
+          "widget": {
+            "name": "vision"
+          },
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "localized_name": "rewriter",
+          "name": "rewriter",
+          "type": "YOGURT_H3_REWRITER",
+          "links": [
+            6
+          ]
+        }
+      ],
+      "title": "改写模型 → rewriter（工程“剧本”页打开自动改写）",
+      "properties": {
+        "Node name for S&R": "YogurtH3RewriteModel"
+      },
+      "widgets_values": [
+        "openai",
+        "gpt-4.1",
+        "",
+        "",
+        0.7,
+        8192,
+        true
+      ],
+      "widgets_values_named": {
+        "provider": "openai",
+        "model": "gpt-4.1",
+        "base_url": "",
+        "api_key": "",
+        "temperature": 0.7,
+        "max_tokens": 8192,
+        "vision": true
+      }
+    }
+  ],
+  "links": [
+    [
+      1,
+      2,
+      0,
+      9,
+      0,
+      "MODEL"
+    ],
+    [
+      2,
+      4,
+      0,
+      9,
+      1,
+      "CLIP"
+    ],
+    [
+      3,
+      5,
+      0,
+      9,
+      2,
+      "VAE"
+    ],
+    [
+      4,
+      6,
+      0,
+      9,
+      3,
+      "VAE"
+    ],
+    [
+      5,
+      3,
+      0,
+      9,
+      4,
+      "MODEL"
+    ],
+    [
+      6,
+      10,
+      0,
+      9,
+      6,
+      "YOGURT_H3_REWRITER"
+    ]
+  ],
+  "groups": [],
+  "config": {},
+  "extra": {
+    "ds": {
+      "scale": 1,
+      "offset": [
+        0,
+        0
+      ]
+    }
+  },
+  "version": 0.4
+}

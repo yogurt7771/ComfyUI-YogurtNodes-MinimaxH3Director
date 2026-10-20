@@ -1,12 +1,12 @@
 [project]
 name = "comfyui-yogurtnodes-minimaxh3director"
-version = "0.3.0"
-description = "MiniMax H3 long video for ComfyUI: character replacement and multi-segment stories on one sampler with direct AV-latent continuation"
+version = "1.0.0"
+description = "Visual MiniMax H3 director for ComfyUI: shot timeline with text, first/last-frame, reference and source-video shots, masked repaint, refine pass and region detailing, rendered to a finished video"
 readme = "README.md"
 license = {file = "LICENSE"}
 requires-python = ">=3.10"
 dependencies = []
-keywords = ["comfyui", "minimax-h3", "character-replacement", "long-video", "story"]
+keywords = ["comfyui", "minimax-h3", "video", "director", "timeline", "inpainting"]
 
 [tool.comfy]
 PublisherId = "yogurt"

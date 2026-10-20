@@ -52,8 +52,12 @@ def carry_latent_tail(target_latent, previous_latent, overlap_frames, continue_a
     video_mask[:, :, :video_tokens] = 0.0
 
     audio = target_audio.clone()
-    audio_mask = torch.ones((1, 1, 1, audio.shape[-1]), dtype=torch.float32, device=audio.device)
-    if continue_audio:
+    existing_mask = target_latent.get("noise_mask")
+    locked_audio = (getattr(existing_mask, "is_nested", False)
+                    and bool(torch.all(existing_mask.unbind()[1] == 0)))
+    audio_mask = torch.zeros((1, 1, 1, audio.shape[-1]), dtype=torch.float32, device=audio.device) if locked_audio else torch.ones(
+        (1, 1, 1, audio.shape[-1]), dtype=torch.float32, device=audio.device)
+    if continue_audio and not locked_audio:
         audio_tokens = min(round(overlap_frames * AUDIO_LATENT_FPS / FPS), source_audio.shape[-1], audio.shape[-1])
         audio[..., :audio_tokens] = source_audio[:1, ..., -audio_tokens:].to(audio)
         release = min(_AUDIO_RELEASE_TOKENS, audio_tokens)

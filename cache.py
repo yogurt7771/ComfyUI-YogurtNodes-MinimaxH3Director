@@ -1,4 +1,4 @@
-"""Lossless per-window checkpoints; all paths are derived from content hashes."""
+"""Content-addressed director cache under output/yogurt_h3_director/cache; every path is a key digest."""
 
 import hashlib
 import json
@@ -10,98 +10,91 @@ import folder_paths
 import safetensors.torch
 import torch
 
+MODEL_FOLDERS = ("diffusion_models", "checkpoints", "text_encoders", "vae", "loras", "upscale_models", "model_patches")
+MODEL_EXTENSIONS = (".safetensors", ".sft", ".pt", ".pth", ".ckpt", ".bin", ".gguf")
+
 
 def digest(value):
     return hashlib.sha256(json.dumps(value, sort_keys=True, ensure_ascii=False, default=str).encode()).hexdigest()
 
 
 def tensor_digest(tensor):
-    hasher = hashlib.sha256()
-    hasher.update(str((tuple(tensor.shape), tensor.dtype)).encode())
-    # Bound staging memory when hashing a long batch.
-    for frame in tensor:
+    hasher = hashlib.sha256(str((tuple(tensor.shape), tensor.dtype)).encode())
+    for frame in tensor.reshape(-1, *tensor.shape[-2:]) if tensor.ndim > 2 else [tensor]:
         hasher.update(frame.detach().cpu().contiguous().reshape(-1).view(torch.uint8).numpy().tobytes())
     return hasher.hexdigest()
 
 
-def video_digest(video):
-    source = video.get_stream_source()
-    hasher = hashlib.sha256()
-    if isinstance(source, str):
-        with open(source, "rb") as handle:
-            for chunk in iter(lambda: handle.read(8 * 1024 * 1024), b""):
-                hasher.update(chunk)
-    else:
-        source.seek(0)
-        for chunk in iter(lambda: source.read(8 * 1024 * 1024), b""):
-            hasher.update(chunk)
-        source.seek(0)
-    return digest([hasher.hexdigest(), video.get_active_trim_window(), video.get_dimensions()])
+def _file_stamp(name):
+    if not name.lower().endswith(MODEL_EXTENSIONS):
+        return None
+    for folder in MODEL_FOLDERS:
+        path = folder_paths.get_full_path(folder, name)
+        if path:
+            stat = os.stat(path)
+            return [folder, stat.st_size, stat.st_mtime_ns]
+    return None
 
 
-def upstream_signature(prompt, node_id):
-    """Hash render dependencies, excluding unrelated output/UI settings and secrets."""
+def upstream_signature(prompt, node_id, names):
+    """Hash the graph feeding ``names`` of this node, including the size/time of every model file it loads."""
     prompt = prompt or {}
     root = prompt.get(str(node_id), {}).get("inputs", {})
+    seen = {}
 
     def resolve(value):
         if isinstance(value, list) and len(value) == 2 and str(value[0]) in prompt:
-            node = prompt[str(value[0])]
-            inputs = {k: resolve(v) for k, v in node.get("inputs", {}).items()}
-            files = {}
-            for k, folder in (("unet_name", "diffusion_models"), ("clip_name", "text_encoders"),
-                              ("vae_name", "vae"), ("lora_name", "loras")):
-                if isinstance(inputs.get(k), str):
-                    path = folder_paths.get_full_path(folder, inputs[k])
-                    if path:
-                        stat = os.stat(path)
-                        files[k] = [stat.st_size, stat.st_mtime_ns]
-            return [node["class_type"], inputs, files, value[1]]
+            node_key = str(value[0])
+            if node_key not in seen:
+                seen[node_key] = None
+                node = prompt[node_key]
+                inputs = {k: resolve(v) for k, v in node.get("inputs", {}).items()}
+                files = {k: _file_stamp(v) for k, v in inputs.items() if isinstance(v, str)}
+                seen[node_key] = [node["class_type"], inputs, {k: v for k, v in files.items() if v}]
+            return [seen[node_key], value[1]]
         return value
 
-    sources = {k: root[k] for k in ("model", "clip", "vae", "audio_vae", "sampler", "sigmas") if k in root}
-    # Refine models reach the sampler through the plan; follow only the plan chain, not prompt or API-key nodes.
-    link = root.get("plan")
-    while isinstance(link, list) and str(link[0]) in prompt:
-        inputs = prompt[str(link[0])].get("inputs", {})
-        if "refine" in inputs:
-            sources["refine"] = inputs["refine"]
-            break
-        link = inputs.get("plan")
-    return digest({k: resolve(v) for k, v in sources.items()})
+    return digest({name: resolve(root[name]) for name in names if name in root})
 
 
-def checkpoint_path(key):
+def root():
+    return Path(folder_paths.get_output_directory()) / "yogurt_h3_director" / "cache"
+
+
+def path_for(key, suffix):
     if len(key) != 64 or any(c not in "0123456789abcdef" for c in key):
-        raise ValueError("Invalid segment cache key")
-    return Path(folder_paths.get_output_directory()) / "yogurt_h3_cache" / key[:2] / (key + ".safetensors")
+        raise ValueError("Invalid director cache key")
+    return root() / key[:2] / (key + suffix)
 
 
-def read_checkpoint(key):
-    path = checkpoint_path(key)
-    if not path.is_file():
-        return None
-    return safetensors.torch.load_file(str(path))
+def exists(key, suffix=".safetensors"):
+    return path_for(key, suffix).is_file()
 
 
-def write_checkpoint(key, tensors):
-    path = checkpoint_path(key)
+def read_tensors(key):
+    path = path_for(key, ".safetensors")
+    return safetensors.torch.load_file(str(path)) if path.is_file() else None
+
+
+def write_tensors(key, tensors):
+    path = path_for(key, ".safetensors")
     path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_suffix(f".{uuid.uuid4().hex}.tmp")
+    temporary = path.with_name(f"{path.name}.{uuid.uuid4().hex}.tmp")
     safetensors.torch.save_file({k: v.detach().cpu().contiguous() for k, v in tensors.items()}, str(temporary))
     os.replace(temporary, path)
 
 
-def selected_segments(text, count):
-    selected = set()
-    for item in text.replace("，", ",").split(","):
-        item = item.strip()
-        if not item:
-            continue
-        ends = item.split("-")
-        start = int(ends[0])
-        end = int(ends[-1])
-        if len(ends) > 2 or start < 1 or end < start or end > count:
-            raise ValueError(f"重跑段号需在 1–{count} 内，例如 2,4-6。")
-        selected.update(range(start, end + 1))
-    return selected
+def write_json(key, value):
+    path, temporary = temporary_path(key, ".json")
+    temporary.write_text(json.dumps(value), encoding="utf-8")
+    os.replace(temporary, path)
+
+
+def read_json(key):
+    return json.loads(path_for(key, ".json").read_text(encoding="utf-8"))
+
+
+def temporary_path(key, suffix):
+    path = path_for(key, suffix)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    return path, path.with_name(f"{path.name}.{uuid.uuid4().hex}.tmp")
