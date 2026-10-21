@@ -27,7 +27,7 @@ if getattr(PromptServer, "instance", None) is not None:
         data = await request.json()
 
         def work():
-            project = load_project(data["project"])
+            project = load_project(data["project"], data.get("settings"))
             return rewrite_project(project, rewriter_config(**data["rewriter"]), Media())
 
         try:

@@ -1,7 +1,10 @@
 """Director render: cache keys and needs first, then encode / sample / decode work grouped by model.
 
 Stages per shot: base (generate, or encode the source video) -> repaint layers -> 二采 refine ->
-decoded frames -> 局部精修 crops -> assembly. Every stage result is cached under a key over everything
+decoded frames -> 局部精修 crops -> assembly. With 二采 the base and repaints run on a draft canvas (the output
+divided by the refine scale) and the refine pass brings every shot to the output size: "two_pass" stops the draft
+before the last refine steps of its schedule and runs those steps at full size, "upscale" finishes the draft and
+resamples it from a low noise level. Every stage result is cached under a key over everything
 that affects it, so editing one shot re-runs that shot and the shots continuing from it, nothing else.
 """
 
@@ -19,7 +22,7 @@ from comfy_extras.nodes_minimax_h3 import _encode_ref_audio, align_frame_count, 
 from comfy_extras.nodes_upscale_model import ImageUpscaleWithModel
 from server import PromptServer
 
-from . import cache, detail, sampling
+from . import cache, detail, latent_upscale, sampling
 from .cache import digest
 from .conditioning import encode_keyframes, encode_text, shot_conditioning
 from .continuation import carry_latent_tail, install_drift_control
@@ -71,25 +74,29 @@ def _latent(tensors):
 
 def _store(key, latent):
     video, audio = sampling.streams(latent)
-    cache.write_tensors(key, {"video": video, "audio": audio})
+    extra = {"audio_noise": latent["audio_noise"]} if "audio_noise" in latent else {}
+    cache.write_tensors(key, {"video": video, "audio": audio, **extra})
 
 
 class Render:
     def __init__(self, node_id, prompt, project, models, media, settings, report=()):
         self.node_id, self.project, self.m, self.media = node_id, project, models, media
         self.windows = plan_windows(project)
-        self.width, self.height = project["width"], project["height"]
-        self.refine = project["refine"] if project["refine"]["enabled"] else None
+        self.out_w, self.out_h = project["width"], project["height"]
+        self.refine = project["refine"] if project["refine"]["mode"] != "off" else None
         scale = self.refine["scale"] if self.refine else 1.0
-        self.out_w, self.out_h = _round32(self.width * scale), _round32(self.height * scale)
+        self.width, self.height = _round32(self.out_w / scale), _round32(self.out_h / scale)
         signature = lambda names: cache.upstream_signature(prompt, node_id, names)
         base = [VERSION, signature(["model", "ref_model", "clip", "vae", "audio_vae", "sampler", "sigmas"]), settings,
                 self.width, self.height, project["overlap"], project["negative_prompt"], project["ref_image_size"]]
         self.env = {"base": digest(base), "inpaint": signature(["inpaint_patch"]),
-                    "refine": digest([base, signature(["refine_model", "upscale_model"]), self.refine]),
+                    "refine": digest([base, signature(["refine_model", "upscale_model"]), self.refine, self.out_w, self.out_h,
+                                      self.refine and self.refine["upscaler"] == "h3_latent" and latent_upscale.identity(self.refine["latent_model"])]),
                     "detail": digest([base, signature(["refine_model"]), project["detail"]])}
         self.report = list(report)
         self.final, self.refined, self.conds, self.keyframes, self.detail_conds = {}, {}, {}, {}, {}
+        # Two-pass drafts keep the noise their generated audio was on, so the full-size pass continues that path.
+        self.audio_noise = {}
 
     def event(self, index, stage):
         send_event(self.node_id, self.windows[index].shot["id"], stage)
@@ -119,6 +126,18 @@ class Render:
     def shot_model(self, shot):
         return self.m.ref_model if self.uses_refs(shot) and self.m.ref_model is not None else self.m.model
 
+    def tail_steps(self, shot):
+        """Steps of the shot's schedule that two-pass 二采 leaves for the full-size pass (0: the draft runs them all)."""
+        return self.refine["steps"] if self.refine and self.refine["mode"] == "two_pass" and shot["refine"] else 0
+
+    def schedule(self, shot):
+        """The shot's own schedule: from noise, from a source video's strength, or for a source edit from its strongest repaint."""
+        if self.edits_source(shot):
+            denoise = max(layer["strength"] for layer in shot["repaints"])
+        else:
+            denoise = shot["source"]["strength"] if shot["kind"] == "source" else 1.0
+        return sampling.schedule(self.shot_model(shot), self.m.steps, self.m.scheduler, denoise, self.m.sigmas)
+
     # ------------------------------------------------------------------ planning
 
     def _spec(self, window):
@@ -126,18 +145,18 @@ class Render:
         refs, source = shot["refs"], shot["source"]
         lock = [identity(self.project["soundtrack"]), window.start - window.head] if self.audio_mode(shot) == "soundtrack" else None
         return {"kind": shot["kind"], "prompt": shot["prompt"], "seed": self.seed(shot["id"], shot["seed"]), "head": window.head, "gen": window.gen,
-                "keyframes": [[window.frame(k["at"]), identity(k["media"])] for k in shot["keyframes"]],
-                "refs": [[identity(m) for m in refs["images"]], [[identity(v["media"]), v["audio"]] for v in refs["videos"]],
+                "keyframes": [[window.frame(k["at"]), identity(k["media"]), k["fit"]] for k in shot["keyframes"]],
+                "refs": [[[identity(m["media"]), m["fit"]] for m in refs["images"]], [[identity(v["media"]), v["audio"]] for v in refs["videos"]],
                          [identity(m) for m in refs["audios"]]],
                 "source": source and [identity(source["media"]), source["start"], source["regen"], source["strength"]],
-                "audio": [self.audio_mode(shot), lock]}
+                "audio": [self.audio_mode(shot), lock], "ref_strength": shot["ref_strength"]}
 
     def plan(self):
         self.keys = []
         for i, window in enumerate(self.windows):
             shot = window.shot
             previous = self.keys[i - 1] if window.carry else None
-            layers = [digest(["base", self.env["base"], self._spec(window), previous and previous["final"]])]
+            layers = [digest(["base", self.env["base"], self._spec(window), self.tail_steps(shot), previous and previous["final"]])]
             for layer in shot["repaints"]:
                 layers.append(digest(["repaint", layers[-1], {**layer, "mask": self.media.identity(layer["mask"])}, self.env["inpaint"]]))
             if self.passthrough(shot):
@@ -197,13 +216,14 @@ class Render:
         return self.encode_audio(audio, window.gen)
 
     def repaint_pixels(self, window, layer, width, height):
+        """Grow and feather are in output pixels, the size the editor paints on."""
         a, b = window.span(layer["start"], layer["end"])
         mask = sampling.window_mask(self.media.mask(layer["mask"]), window.gen, a, b, width, height)
-        return sampling.grow(mask, round(layer["grow"] * width / self.width))
+        return sampling.grow(mask, round(layer["grow"] * width / self.out_w))
 
     def composite_mask(self, window, width, height):
         """Feathered union of the repaint masks; regenerated pixels are pasted over the original video with it."""
-        masks = [sampling.feather(self.repaint_pixels(window, layer, width, height), round(layer["feather"] * width / self.width))
+        masks = [sampling.feather(self.repaint_pixels(window, layer, width, height), round(layer["feather"] * width / self.out_w))
                  for layer in window.shot["repaints"]]
         return torch.stack(masks).amax(0)
 
@@ -223,7 +243,7 @@ class Render:
             prompts = [shot["prompt"]] + [shot["repaints"][j]["prompt"] or shot["prompt"] for j in layers]
             source = self.source_frames(window, self.width, self.height) if shot["kind"] == "source" and shot["source"]["regen"] else None
             self.conds[i] = shot_conditioning(window, self.project, self.media, self.m.clip, self.m.vae, self.m.audio_vae,
-                                              prompts, self.m.cfg, source)
+                                              prompts, self.m.cfg, self.width, self.height, source)
             self.keyframes[i] = encode_keyframes(self.conds[i].keyframe_images, self.m.vae, self.width, self.height)
         for i, window in enumerate(self.windows):
             for j, item in enumerate(window.shot["details"]):
@@ -243,10 +263,14 @@ class Render:
                 self.event(i, "sampling")
                 latent = self.base(i)
                 _store(keys["layers"][0], latent)
+                noise = latent.get("audio_noise")
                 done = "生成" if not self.edits_source(shot) else "编码源视频"
             else:
                 latent = _latent(cache.read_tensors(keys["layers"][flags["resume"]]))
+                noise = cache.read_tensors(keys["layers"][0]).get("audio_noise") if self.tail_steps(shot) else None
                 done = "读取缓存"
+            if noise is not None:
+                self.audio_noise[i] = noise
             for j in range(max(flags["resume"], 0), len(shot["repaints"])):
                 self.event(i, "repainting")
                 latent = self.repaint(i, latent, j)
@@ -270,12 +294,19 @@ class Render:
         else:
             latent = sampling.av_latent(video, audio)
         model = self.shot_model(shot)
-        sigmas = sampling.schedule(model, m.steps, m.scheduler, denoise, m.sigmas)
+        sigmas = self.schedule(shot)
+        if self.tail_steps(shot):
+            sigmas = sampling.split(sigmas, self.tail_steps(shot))[0]
         if window.carry:
             latent, tokens = carry_latent_tail(latent, self.final[i - 1], window.head, continue_audio=True)
             model = install_drift_control(model, latent, sigmas, tokens)
         positive, negative = self.conds[i].conds(shot["prompt"], self.keyframes[i])
-        return {"samples": sampling.sample(model, positive, negative, m.cfg, m.sampler, sigmas, latent, self.seed(shot["id"], shot["seed"]))}
+        last = {} if self.tail_steps(shot) and lock is None else None
+        out = {"samples": sampling.sample(model, positive, negative, m.cfg, m.sampler, sigmas, latent, self.seed(shot["id"], shot["seed"]), last=last)}
+        if last:
+            # The draft's last step started at sigmas[-2]; its audio continues from there in the full-size pass.
+            out["audio_noise"] = sampling.trajectory_noise(model, last, float(sigmas[-2]))
+        return out
 
     def repaint(self, i, latent, j):
         window, shot, m = self.windows[i], self.windows[i].shot, self.m
@@ -304,10 +335,11 @@ class Render:
         return torch.cat(out)
 
     def refine_shots(self):
-        """Decode, upscale and re-encode every shot first (VAE), then run the low-denoise pass (UNET)."""
+        """Bring every shot to the output size first (learned latent upscaler, or VAE decode / upscale / encode),
+        then run the full-size pass (UNET)."""
         if self.refine is None:
             return
-        prepared = {}
+        prepared, lift = {}, None
         for i, window in enumerate(self.windows):
             if not self.need[i]["refine"]:
                 continue
@@ -319,13 +351,18 @@ class Render:
                 audio = torch.zeros((1, 32, 2, temporal_shape(window.gen)[2]))
             else:
                 video, audio = sampling.streams(self.final[i])
-                frames = self.upscale(_decode(self.m.vae, video))
-                if self.edits_source(shot):
-                    frames = torch.lerp(self.source_frames(window, self.out_w, self.out_h), frames,
-                                        self.composite_mask(window, self.out_w, self.out_h)[..., None])
-                    pixels = torch.stack([self.repaint_pixels(window, layer, self.out_w, self.out_h) for layer in shot["repaints"]])
-                    mask = sampling.token_mask(pixels.amax(0), video.shape[2])
-                video = self.m.vae.encode(frames)
+                if self.refine["upscaler"] == "h3_latent" and not self.edits_source(shot):
+                    lift = lift or latent_upscale.load(self.refine["latent_model"])
+                    video = latent_upscale.upscale(lift, video, self.out_h // 16, self.out_w // 16)
+                else:
+                    # Source edits are composited with the source pixels, so they always take the pixel path.
+                    frames = self.upscale(_decode(self.m.vae, video))
+                    if self.edits_source(shot):
+                        frames = torch.lerp(self.source_frames(window, self.out_w, self.out_h), frames,
+                                            self.composite_mask(window, self.out_w, self.out_h)[..., None])
+                        pixels = torch.stack([self.repaint_pixels(window, layer, self.out_w, self.out_h) for layer in shot["repaints"]])
+                        mask = sampling.token_mask(pixels.amax(0), video.shape[2])
+                    video = self.m.vae.encode(frames)
                 if i in self.conds:
                     keyframes = encode_keyframes(self.conds[i].keyframe_images, self.m.vae, self.out_w, self.out_h)
             prepared[i] = (video.to(comfy.model_management.intermediate_device()), audio, mask, keyframes)
@@ -343,14 +380,25 @@ class Render:
                 comfy.model_management.throw_exception_if_processing_interrupted()
                 self.event(i, "refining")
                 model = m.refine_model if m.refine_model is not None else self.shot_model(shot)
-                latent = sampling.av_latent(video, audio, mask, sampling.locked_audio_mask(audio))
-                sigmas = sampling.schedule(model, self.refine["steps"], m.scheduler, self.refine["denoise"])
+                audio_noise = None
+                if self.refine["mode"] == "two_pass":
+                    # The draft stopped early, so generated sound takes the last steps too, on the path it was already on.
+                    sigmas = sampling.split(self.schedule(shot), self.refine["steps"])[1]
+                    free_audio = self.audio_mode(shot) == "generate"
+                    audio_noise = self.audio_noise.get(i)
+                    if free_audio and audio_noise is None:
+                        self.report.append(f"第 {i + 1} 镜：首采没有留下声音的噪声（采样器未回报或旧缓存），二采声音重新加噪")
+                else:
+                    sigmas = sampling.schedule(model, self.refine["steps"], m.scheduler, self.refine["denoise"])
+                    free_audio = False
+                latent = sampling.av_latent(video, audio, mask, None if free_audio else sampling.locked_audio_mask(audio))
                 if window.carry:
-                    latent, tokens = carry_latent_tail(latent, self.refined[i - 1], window.head, continue_audio=False)
+                    latent, tokens = carry_latent_tail(latent, self.refined[i - 1], window.head, continue_audio=free_audio)
                     model = install_drift_control(model, latent, sigmas, tokens)
                 positive, negative = self.conds[i].conds(shot["prompt"], keyframes)
-                latent = {"samples": sampling.sample(model, positive, negative, m.cfg, m.sampler, sigmas, latent, self.seed(shot["id"], shot["seed"]))}
-                self.report.append(f"第 {i + 1} 镜：二采 {self.out_w}×{self.out_h}")
+                latent = {"samples": sampling.sample(model, positive, negative, m.cfg, m.sampler, sigmas, latent, self.seed(shot["id"], shot["seed"]),
+                                                     audio_noise=audio_noise if free_audio else None)}
+                self.report.append(f"第 {i + 1} 镜：二采 {self.width}×{self.height} → {self.out_w}×{self.out_h}（{sigmas.shape[-1] - 1} 步，从 {float(sigmas[0]):.2f} 起）")
             _store(self.keys[i]["refined"], latent)
             self.refined[i] = latent
 
@@ -374,8 +422,6 @@ class Render:
                     frames = torch.lerp(self.source_frames(window, self.out_w, self.out_h), frames,
                                         self.composite_mask(window, self.out_w, self.out_h)[..., None])
             if self.audio_mode(shot) == "generate":
-                # Refine locks the audio stream, so the first-pass audio is the shot's sound.
-                audio = sampling.streams(self.final[i])[1] if i in self.final else audio
                 wave = self.m.audio_vae.decode(audio).movedim(-1, 1).float().cpu()
                 rate = int(self.m.audio_vae.first_stage_model.output_sample_rate)
                 cache.write_tensors(keys["frames"], {"waveform": match_rate({"waveform": wave, "sample_rate": rate}, AUDIO_RATE)[0]})

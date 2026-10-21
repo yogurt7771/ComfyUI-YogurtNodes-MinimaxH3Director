@@ -12,6 +12,10 @@ import torch.nn.functional as F
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT.parents[1]))
 
+# Tests run next to a live ComfyUI: fail with an OOM rather than let the driver spill VRAM into shared system memory.
+if torch.cuda.is_available():
+    torch.cuda.set_per_process_memory_fraction(0.25)
+
 from comfy.ldm.minimax.model import FRAME_PER_TOKEN  # noqa: E402
 from comfy.nested_tensor import NestedTensor  # noqa: E402
 
@@ -99,17 +103,38 @@ class FakeSampler:
     def schedule(self, model, steps, scheduler, denoise=1.0, custom=None):
         return torch.linspace(denoise, 0.0, steps + 1)
 
-    def sample(self, model, positive, negative, cfg, sampler, sigmas, latent, seed):
+    def sample(self, model, positive, negative, cfg, sampler, sigmas, latent, seed, audio_noise=None, last=None):
         video, audio = latent["samples"].unbind()
         mask = latent.get("noise_mask")
         video_mask, audio_mask = mask.unbind() if mask is not None else (torch.ones(1), torch.ones(1))
         self.calls.append({"model": model, "prompt": positive[0][1]["text"], "seed": seed, "shape": tuple(video.shape),
                            "keyframes": [k["resolved_frame_index"] for k in positive[0][1].get("minimax_keyframes", [])],
                            "refs": [r["kind"] for r in positive[0][1].get("minimax_refs", [])],
+                           "cond_strength": positive[0][1].get("minimax_visual_cond_noise_aug"),
                            "video_mask": video_mask.clone(), "audio_mask": audio_mask.clone(), "steps": sigmas.shape[-1] - 1,
-                           "start": round(float(sigmas[0]), 4)})
+                           "start": round(float(sigmas[0]), 4), "sigmas": [round(float(s), 4) for s in sigmas],
+                           "audio_noise": audio_noise, "last": last is not None})
         fill = (seed % 89 + 5) / 100.0
-        return NestedTensor((video + video_mask * (fill - video), audio + audio_mask * (fill - audio)))
+        out = NestedTensor((video + video_mask * (fill - video), audio + audio_mask * (fill - audio)))
+        if last is not None:
+            last.update(x=NestedTensor((video, audio + seed % 7)), x0=out)
+        return out
+
+    @staticmethod
+    def trajectory_noise(model, last, sigma):
+        """Stand-in for sampling.trajectory_noise: tags the noise with the draft's sigma so tests can trace it."""
+        return torch.full_like(last["x0"].unbind()[1], sigma)
+
+
+def tiny_upscaler(module, path):
+    """A random 32-channel LatentResizer3D checkpoint, small enough for tests."""
+    import safetensors.torch
+
+    model = module.latent_upscale.LatentResizer3D(24, 32, 2, 2, 5, dtype=torch.float32)
+    generator = torch.Generator().manual_seed(0)
+    for parameter in model.parameters():
+        parameter.data = torch.randn(parameter.shape, generator=generator) * 0.02
+    safetensors.torch.save_file({k: v.contiguous() for k, v in model.state_dict().items()}, str(path))
 
 
 def models(module, **kwargs):

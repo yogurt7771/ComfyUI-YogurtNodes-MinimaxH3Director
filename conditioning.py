@@ -7,11 +7,11 @@ canvases (first pass and refine), so the keyframe images are kept and re-encoded
 from dataclasses import dataclass, field
 import math
 
-import av
 import node_helpers
+from comfy.ldm.minimax.model import VISUAL_COND_TIMESTEP
 from comfy_extras.nodes_minimax_h3 import CANVAS_MULTIPLE, FPS, REF_IMAGE_SHORT_EDGE, _encode_ref_audio, adapt_canvas
 
-from .media import fit, resolve_path
+from .media import fit
 
 
 @dataclass
@@ -20,6 +20,7 @@ class ShotConditioning:
     keyframe_images: list
     refs: list = field(default_factory=list)
     uses_refs: bool = False
+    strength: float = 1.0
 
     def conds(self, prompt, keyframes):
         """(positive, negative) for ``prompt`` with keyframe latents for the current canvas."""
@@ -28,6 +29,9 @@ class ShotConditioning:
             values["minimax_keyframes"] = keyframes
         if self.refs:
             values["minimax_refs"] = self.refs
+        if self.strength < 1.0:
+            # H3 mixes this much of each visual condition (references, keyframes) with noise; 0.999 is its default.
+            values["minimax_visual_cond_noise_aug"] = VISUAL_COND_TIMESTEP * self.strength
         positive, negative = self.texts[prompt]
         if not values:
             return positive, negative
@@ -38,53 +42,70 @@ def _round(value):
     return max(CANVAS_MULTIPLE, round(value / CANVAS_MULTIPLE) * CANVAS_MULTIPLE)
 
 
+def place(image, width, height, mode):
+    """[1, H, W, C] image on a ``width`` x ``height`` canvas: "crop" covers, "pad" fits inside black bars, "stretch" distorts."""
+    if mode != "pad":
+        return fit(image, width, height, "center" if mode == "crop" else "disabled")
+    h, w = image.shape[1:3]
+    scale = min(width / w, height / h)
+    inner_w, inner_h = max(1, round(w * scale)), max(1, round(h * scale))
+    out = image.new_zeros((1, height, width, 3))
+    top, left = (height - inner_h) // 2, (width - inner_w) // 2
+    out[:, top:top + inner_h, left:left + inner_w] = fit(image, inner_w, inner_h, "disabled")
+    return out
+
+
 def keyframe_images(window, media):
-    """[(generation index, image)]; a later keyframe at the same frame replaces an earlier one."""
+    """[(generation index, image, fit mode)]; a later keyframe at the same frame replaces an earlier one.
+
+    "auto" follows MiniMaxH3ImageToVideo: the first frame stretches (geometry anchor), the rest cover-crop."""
     frames = {}
     for item in window.shot["keyframes"]:
-        frames[window.frame(item["at"])] = media.image(item["media"])
-    return sorted(frames.items(), key=lambda kv: kv[0])
+        index = window.frame(item["at"])
+        mode = item["fit"] if item["fit"] != "auto" else "stretch" if index == 0 else "crop"
+        frames[index] = (media.image(item["media"]), mode)
+    return [(index, image, mode) for index, (image, mode) in sorted(frames.items(), key=lambda kv: kv[0])]
 
 
 def encode_keyframes(images, vae, width, height):
-    # MiniMaxH3ImageToVideo stretches the first frame (geometry anchor) and cover-crops the rest.
-    return [{"resolved_frame_index": index, "latent": vae.encode(fit(image, width, height, "disabled" if index == 0 else "center"))}
-            for index, image in images]
+    return [{"resolved_frame_index": index, "latent": vae.encode(place(image, width, height, mode))} for index, image, mode in images]
 
 
-def video_size(media, item):
-    if "input" in item:
-        frames = media.graph(item)
-        return frames.shape[2], frames.shape[1]
-    with av.open(resolve_path(item)) as container:
-        stream = container.streams.video[0]
-        return stream.codec_context.width, stream.codec_context.height
+def references(media, window, project, source_frames, vae, audio_vae):
+    """Presentation items and DiT ref blocks in ReferenceToVideo order: images, videos, standalone audio.
 
-
-def references(media, window, project, source_frames, vae, audio_vae, width, height):
-    """Presentation items and DiT ref blocks in ReferenceToVideo order: images, videos, standalone audio."""
+    "match" sizes reference images to the output canvas, also for a two-pass draft: the same references
+    condition the full-size pass, where their detail matters."""
+    width, height = project["width"], project["height"]
     refs = window.shot["refs"]
     items, blocks = [], []
     for item in refs["images"]:
-        image = media.image(item)
+        image = media.image(item["media"])
         h, w = image.shape[1:3]
+        # Down only, to the canvas area ("match") or a 2048 short edge ("max"), as ReferenceToVideo does.
         if project["ref_image_size"] == "match":
             scale = min(1.0, math.sqrt(width * height / (w * h)))
         else:
             scale = min(1.0, REF_IMAGE_SHORT_EDGE / min(w, h))
-        tw, th = _round(w * scale), _round(h * scale)
-        resized = fit(image, tw, th, "disabled")
+        if item["fit"] == "auto":
+            tw, th = _round(w * scale), _round(h * scale)
+            resized = fit(image, tw, th, "disabled")
+        else:
+            # Crop / pad / stretch take the canvas aspect at the same pixel budget.
+            area = w * h * scale * scale
+            tw, th = _round(math.sqrt(area * width / height)), _round(math.sqrt(area * height / width))
+            resized = place(image, tw, th, item["fit"])
         items.append({"type": "image", "data": resized})
         blocks.append({"kind": "image", "latent_h": th // 16, "latent_w": tw // 16, "latent": vae.encode(resized)})
 
     videos = [(source_frames, None)] if source_frames is not None else []
     for ref in refs["videos"]:
-        vw, vh = video_size(media, ref["media"])
+        vw, vh = media.video_size(ref["media"])
         cw, ch = adapt_canvas(vw, vh)
         if vw * vh < cw * ch:
             cw, ch = _round(vw), _round(vh)
-        frames = media.video(ref["media"], 0, window.gen, cw, ch, "disabled")
-        soundtrack = media.audio(ref["media"], 0, window.gen) if ref["audio"] else None
+        frames = media.video(ref["media"], ref["start"], window.gen, cw, ch, "disabled")
+        soundtrack = media.audio(ref["media"], ref["start"], window.gen) if ref["audio"] else None
         videos.append((frames, soundtrack))
     for frames, soundtrack in videos:
         n = min(frames.shape[0], window.gen)
@@ -118,17 +139,16 @@ def encode_text(clip, prompt, images, ref_items):
     return clip.encode_from_tokens_scheduled(tokens)
 
 
-def shot_conditioning(window, project, media, clip, vae, audio_vae, prompts, cfg, source_frames=None):
-    """Encode every prompt the shot samples with (base, repaint overrides) against one shared presentation."""
-    width, height = project["width"], project["height"]
+def shot_conditioning(window, project, media, clip, vae, audio_vae, prompts, cfg, width, height, source_frames=None):
+    """Encode every prompt the shot samples with (base, repaint overrides) against one shared presentation on the
+    first-pass ``width`` x ``height`` canvas."""
     images = keyframe_images(window, media)
-    ref_items, ref_blocks = references(media, window, project, source_frames, vae, audio_vae, width, height)
+    ref_items, ref_blocks = references(media, window, project, source_frames, vae, audio_vae)
     # fl2va presents the first/last keyframes to the text encoder; middle guides and ref2va do not.
-    presented = [fit(image, width, height, "disabled" if index == 0 else "center")
-                 for index, image in images if index in (0, window.gen - 1)]
+    presented = [place(image, width, height, mode) for index, image, mode in images if index in (0, window.gen - 1)]
     texts = {}
     for prompt in dict.fromkeys(prompts):
         positive = encode_text(clip, prompt, presented, ref_items)
         negative = encode_text(clip, project["negative_prompt"], presented, ref_items) if cfg != 1.0 else positive
         texts[prompt] = (positive, negative)
-    return ShotConditioning(texts, images, ref_blocks, bool(ref_items))
+    return ShotConditioning(texts, images, ref_blocks, bool(ref_items), window.shot["ref_strength"])

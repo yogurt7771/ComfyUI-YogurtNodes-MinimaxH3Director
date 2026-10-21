@@ -10,25 +10,42 @@ import json
 
 from comfy_extras.nodes_minimax_h3 import align_frame_count
 
+from .latent_upscale import DEFAULT as LATENT_UPSCALER
+
 FPS = 24
 OVERLAPS = (0, 5, 22, 39, 56)
 MEDIA_TYPES = ("input", "output", "temp")
 AUDIO_MODES = ("generate", "soundtrack", "source", "silent")
+REFINE_MODES = ("off", "two_pass", "upscale")
+REFINE_UPSCALERS = ("h3_latent", "lanczos", "model")
+# How an image meets the canvas; "auto" is the native H3 rule (references keep their aspect, the first keyframe
+# stretches, later keyframes cover-crop).
+FITS = ("auto", "crop", "pad", "stretch")
 
 DEFAULT_PROJECT = {
     "version": 1,
-    "width": 832,
-    "height": 480,
-    "overlap": 22,
-    "negative_prompt": "",
-    "ref_image_size": "match",
     "soundtrack": None,
     "refs": {"images": [], "videos": [], "audios": []},
     "story": "",
     "rewrite": {"enabled": False, "notes": "", "seed": 0},
-    "refine": {"enabled": False, "scale": 1.5, "upscaler": "lanczos", "steps": 8, "denoise": 0.35},
-    "detail": {"steps": 8},
     "shots": [],
+}
+
+# Render settings are director node widgets, not part of the editor's project JSON.
+SETTINGS = {
+    "width": 832,
+    "height": 480,
+    "overlap": 22,
+    "ref_image_size": "match",
+    "negative_prompt": "",
+    "refine": "off",
+    "refine_scale": 2.0,
+    "refine_upscaler": "h3_latent",
+    "refine_latent_model": LATENT_UPSCALER,
+    "refine_steps": 2,
+    "refine_denoise": 0.35,
+    "detail": True,
+    "detail_steps": 8,
 }
 
 
@@ -69,7 +86,7 @@ def _float(value, default, lo, hi):
 
 
 def media(value):
-    """A file under input/output/temp, or a graph input such as ``image_1`` / ``mask_2``."""
+    """A file under input/output/temp, or a graph input such as ``image_1`` / ``mask_2`` / ``video_0`` / ``audio_0``."""
     if not isinstance(value, dict):
         return None
     if value.get("input"):
@@ -86,11 +103,19 @@ def _media_list(values):
     return [m for m in (media(v) for v in (values or [])) if m is not None]
 
 
+def _fit(value):
+    return value if value in FITS else "auto"
+
+
 def _refs(raw):
     raw = raw or {}
-    videos = [{"media": media(item["media"]), "audio": bool(item.get("audio"))}
+    # ``start`` is the 24 fps frame of the material where the reference clip begins.
+    videos = [{"media": media(item["media"]), "audio": bool(item.get("audio")), "start": _int(item.get("start"), 0, 0, 10**7)}
               for item in raw.get("videos") or [] if isinstance(item, dict) and media(item.get("media"))]
-    return {"images": _media_list(raw.get("images")), "videos": videos, "audios": _media_list(raw.get("audios"))}
+    # Reference images used to be stored as bare media; both forms are read.
+    images = [{"media": media(item.get("media", item)), "fit": _fit(item.get("fit"))}
+              for item in raw.get("images") or [] if isinstance(item, dict) and media(item.get("media", item))]
+    return {"images": images, "videos": videos, "audios": _media_list(raw.get("audios"))}
 
 
 def _shot(raw, index, global_refs):
@@ -113,7 +138,7 @@ def _shot(raw, index, global_refs):
     keyframes = []
     for item in raw.get("keyframes") or []:
         if isinstance(item, dict) and media(item.get("media")):
-            keyframes.append({"at": _int(item.get("at"), 0, -1, 10**6), "media": media(item["media"])})
+            keyframes.append({"at": _int(item.get("at"), 0, -1, 10**6), "media": media(item["media"]), "fit": _fit(item.get("fit"))})
     repaints = []
     for j, item in enumerate(raw.get("repaints") or []):
         if not isinstance(item, dict) or media(item.get("mask")) is None or item.get("enabled") is False:
@@ -149,6 +174,8 @@ def _shot(raw, index, global_refs):
         "global_refs": {kind: len(inherited[kind]) for kind in own},
         "inherit_refs": inherit_refs,
         "inherit_prompt": bool(raw.get("inherit_prompt", True)),
+        # How closely the shot follows its references and keyframes (H3's visual condition strength).
+        "ref_strength": _float(raw.get("ref_strength"), 1.0, 0.1, 1.0),
         "source": source,
         "audio": audio,
         "repaints": repaints,
@@ -158,36 +185,40 @@ def _shot(raw, index, global_refs):
     }
 
 
-def load_project(text):
+def load_project(text, settings=None):
+    """The editor's project JSON plus the node's render ``settings`` (widget values, see SETTINGS)."""
     try:
         data = json.loads(text) if text and text.strip() else {}
     except json.JSONDecodeError as error:
         raise ValueError(f"导演台工程数据损坏：{error}") from error
     if not isinstance(data, dict):
         raise ValueError("导演台工程数据必须是 JSON 对象。")
-    refine = {**DEFAULT_PROJECT["refine"], **(data.get("refine") or {})}
-    detail = {**DEFAULT_PROJECT["detail"], **(data.get("detail") or {})}
+    s = {**SETTINGS, **(settings or {})}
     rewrite = {**DEFAULT_PROJECT["rewrite"], **(data.get("rewrite") or {})}
     project = {
-        "width": _int(data.get("width"), 832, 64, 4096) // 32 * 32,
-        "height": _int(data.get("height"), 480, 64, 4096) // 32 * 32,
-        "overlap": max(v for v in OVERLAPS if v <= _int(data.get("overlap"), 22, 0, 56)),
-        "negative_prompt": str(data.get("negative_prompt") or ""),
-        "ref_image_size": "max" if data.get("ref_image_size") == "max" else "match",
+        "width": _int(s["width"], 832, 64, 4096) // 32 * 32,
+        "height": _int(s["height"], 480, 64, 4096) // 32 * 32,
+        "overlap": max(v for v in OVERLAPS if v <= _int(s["overlap"], 22, 0, 56)),
+        "negative_prompt": str(s["negative_prompt"] or ""),
+        "ref_image_size": "max" if s["ref_image_size"] == "max" else "match",
         "soundtrack": media(data.get("soundtrack")),
         "refs": _refs(data.get("refs")),
         "story": str(data.get("story") or ""),
         "rewrite": {"enabled": bool(rewrite["enabled"]), "notes": str(rewrite["notes"] or ""), "seed": _int(rewrite["seed"], 0, 0, 2**31)},
-        "refine": {"enabled": bool(refine["enabled"]), "scale": _float(refine["scale"], 1.5, 1.0, 4.0),
-                   "upscaler": "model" if refine["upscaler"] == "model" else "lanczos",
-                   "steps": _int(refine["steps"], 8, 1, 200), "denoise": _float(refine["denoise"], 0.35, 0.05, 1.0)},
-        "detail": {"steps": _int(detail["steps"], 8, 1, 200)},
+        "refine": {"mode": s["refine"] if s["refine"] in REFINE_MODES else "off", "scale": _float(s["refine_scale"], 2.0, 1.0, 4.0),
+                   "upscaler": s["refine_upscaler"] if s["refine_upscaler"] in REFINE_UPSCALERS else "lanczos",
+                   "latent_model": str(s["refine_latent_model"] or LATENT_UPSCALER),
+                   "steps": _int(s["refine_steps"], 2, 1, 200), "denoise": _float(s["refine_denoise"], 0.35, 0.05, 1.0)},
+        "detail": {"steps": _int(s["detail_steps"], 8, 1, 200)},
     }
     project["shots"] = [_shot(raw, i, project["refs"]) for i, raw in enumerate(data.get("shots") or []) if isinstance(raw, dict)]
+    if not s["detail"]:
+        for shot in project["shots"]:
+            shot["details"] = []
     if not project["shots"]:
         raise ValueError("导演台里还没有镜头：在时间线上添加至少一个镜头。")
     if any(s["audio"] == "soundtrack" for s in project["shots"]) and project["soundtrack"] is None:
-        raise ValueError("有镜头使用“配乐音轨”，但工程还没有设置配乐音轨。")
+        raise ValueError("有镜头的声音选了“配乐音轨”，但还没有设置配乐：在导演台“镜头”页的声音旁选择配乐。")
     return project
 
 

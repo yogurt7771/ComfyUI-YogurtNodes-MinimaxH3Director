@@ -14,7 +14,7 @@ director = load()
 rewrite = director.rewrite
 import folder_paths  # noqa: E402
 from langchain_core.language_models.chat_models import BaseChatModel  # noqa: E402
-from langchain_core.messages import AIMessage, ToolMessage  # noqa: E402
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage  # noqa: E402
 from langchain_core.outputs import ChatGeneration, ChatResult  # noqa: E402
 
 
@@ -60,6 +60,7 @@ DONE = AIMessage(content="Done.")
 
 READ_SKILL = AIMessage(content="", tool_calls=[{"name": "read_file", "id": "r1", "args": {"file_path": "/skills/h3-prompt-writing/SKILL.md"}}])
 CONFIG = rewrite.rewriter_config("openai", "scripted-model")
+SIZE = {"width": 128, "height": 64}
 
 
 class RewriteTests(unittest.TestCase):
@@ -87,11 +88,11 @@ class RewriteTests(unittest.TestCase):
                   "keyframes": [{"at": 0, "media": {"filename": "first.png", "subfolder": "", "type": "input"}}]},
                  {"id": "b", "frames": 48, "prompt": "她回头微笑"},
                  {"id": "c", "frames": 48, "prompt": "", "continue": False}]
-        data = {"width": 128, "height": 64, "story": "雨夜街头，一个穿红雨衣的女孩走进咖啡馆。",
+        data = {"story": "雨夜街头，一个穿红雨衣的女孩走进咖啡馆。",
                 "rewrite": {"enabled": True}, "shots": shots}
         for shot_id, fields in changes.items():
             next(s for s in shots if s["id"] == shot_id).update(fields)
-        return director.project.load_project(json.dumps(data))
+        return director.project.load_project(json.dumps(data), SIZE)
 
     def run_rewrite(self, project, event=None):
         return rewrite.rewrite_project(project, CONFIG, director.media.Media(), event)
@@ -159,7 +160,7 @@ class RewriteTests(unittest.TestCase):
         project = self.project(c={"inherit_prompt": False, "prompt": "空镜：雨夜的霓虹招牌"})
         project = director.project.load_project(json.dumps({**{k: v for k, v in project.items() if k != "shots"},
                                                              "refs": {"images": [hero]},
-                                                             "shots": [{**s, "refs": {"images": [], "videos": [], "audios": []}} for s in project["shots"]]}))
+                                                             "shots": [{**s, "refs": {"images": [], "videos": [], "audios": []}} for s in project["shots"]]}), SIZE)
         self.model.replies = answers({i: f"v1 {i}" for i in "abc"})
         self.run_rewrite(project)
         human = self.model.seen[0][1].content
@@ -189,17 +190,30 @@ class RewriteTests(unittest.TestCase):
     def test_source_video_is_shown_from_its_start(self):
         write_video(Path(self.tmp.name) / "input" / "clip.mp4", 48, 128, 64)
         source = {"media": {"filename": "clip.mp4", "subfolder": "", "type": "input"}, "start": 36, "regen": True}
-        project = director.project.load_project(json.dumps({"width": 128, "height": 64, "rewrite": {"enabled": True},
-                                                            "shots": [{"id": "s", "kind": "source", "frames": 12, "prompt": "换成白天", "source": source}]}))
+        project = director.project.load_project(json.dumps({"rewrite": {"enabled": True},
+                                                            "shots": [{"id": "s", "kind": "source", "frames": 12, "prompt": "换成白天", "source": source}]}), SIZE)
         self.model.replies = answers({"s": "day"})
         self.run_rewrite(project)
         human = self.model.seen[0][1].content
         self.assertIn("<Video 1>: the source video this segment rewrites", human[0]["text"])
         self.assertAlmostEqual(brightness(human[2]), 255 * 36 / 47, delta=4)
 
+    def test_agent_is_reminded_when_it_stops_early(self):
+        plan = AIMessage(content="", tool_calls=[{"name": "write_file", "id": "w1", "args": {"file_path": "/plan.md", "content": "1. walk 2. turn 3. cafe"}}])
+        read = AIMessage(content="", tool_calls=[{"name": "read_file", "id": "r2", "args": {"file_path": "/plan.md"}}])
+        self.model.replies = [plan, AIMessage(content="The plan is ready. Next I will write segment 1."), read] + answers({i: f"p{i}" for i in "abc"})
+        _, prompts, _ = self.run_rewrite(self.project())
+        self.assertEqual(prompts, {"a": "pa", "b": "pb", "c": "pc"})
+        reminder = self.model.seen[2][-1]
+        self.assertIsInstance(reminder, HumanMessage)
+        self.assertIn("segment 1 (id `a`)", reminder.content)
+        # The conversation and the plan file carry over into the reminded run.
+        self.assertIn("The plan is ready. Next I will write segment 1.", [m.content for m in self.model.seen[2]])
+        self.assertIn("walk", tool_reply(self.model.seen[3]))
+
     def test_unsubmitted_segment_is_an_error(self):
-        self.model.replies = answers({"a": "pa"})
-        with self.assertRaisesRegex(RuntimeError, "没有交回第 2、3 镜"):
+        self.model.replies = [submit("a", "pa"), AIMessage(content="Done."), AIMessage(content="Done."), AIMessage(content="I have finished the film.")]
+        with self.assertRaisesRegex(RuntimeError, "没有交回第 2、3 镜.*I have finished the film."):
             self.run_rewrite(self.project())
 
 

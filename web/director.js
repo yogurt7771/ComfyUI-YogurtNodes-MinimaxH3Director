@@ -122,6 +122,11 @@ function setup(node) {
     }
     const panel = new Panel(node);
     panels.set(node.id, panel);
+    // The timeline drawn on the panel depends on these node widgets.
+    for (const name of ["width", "height", "overlap", "refine", "refine_scale"]) {
+        const w = widget(node, name), callback = w?.callback;
+        if (w) w.callback = function () { const result = callback?.apply(this, arguments); panel.refresh(); return result; };
+    }
     const dom = node.addDOMWidget("director", "yh3director", panel.root, { serialize: false, hideOnZoom: false, getMinHeight: () => 320 });
     dom.serialize = false;
     dom.computeLayoutSize = () => ({ minHeight: 320, minWidth: 460 });

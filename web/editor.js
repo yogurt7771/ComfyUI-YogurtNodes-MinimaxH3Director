@@ -2,15 +2,19 @@
 import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
 import {
-    FPS, OVERLAPS, STAGES, canvasFor, clamp, clone, effectiveRefs, features, graphInputs, h, isAudio, isVideo, mediaLabel, mediaUrl, refCount,
-    newShot, pickFile, planWindows, previewRewrite, readProject, rewritable, rewriterConfig, secs, storePrompts, totalFrames, uid,
-    upload, writeProject,
+    FPS, STAGES, changed, clamp, clone, effectiveRefs, features, graphInputs, h, isAudio, isVideo, mediaLabel, mediaUrl, refCount,
+    newShot, pickFile, planWindows, previewRewrite, projectData, readProject, rewritable, rewriterConfig, secs, storePrompts, totalFrames, uid,
+    upload, widget, writeProject,
 } from "./core.js";
 import { Painter } from "./painter.js";
 
-const ASPECTS = [["16:9", 16 / 9], ["9:16", 9 / 16], ["1:1", 1], ["4:3", 4 / 3], ["3:4", 3 / 4], ["21:9", 21 / 9]];
+/** Material position as m:ss.ss, or s.ss for clips under a minute. */
+const clipTime = frames => {
+    const seconds = frames / FPS, minutes = Math.floor(seconds / 60);
+    return minutes ? `${minutes}:${(seconds - minutes * 60).toFixed(2).padStart(5, "0")}` : `${seconds.toFixed(2)}s`;
+};
 const AUDIO_LABELS = { generate: "模型生成", soundtrack: "配乐音轨（锁定）", source: "源视频原声（锁定）", silent: "静音" };
-const TABS = [["story", "剧本"], ["shot", "镜头"], ["keys", "首尾帧"], ["refs", "参考"], ["repaint", "局部重绘"], ["detail", "局部精修"], ["project", "工程"]];
+const TABS = [["story", "剧本"], ["shot", "镜头"], ["keys", "首尾帧"], ["refs", "参考"], ["repaint", "局部重绘"], ["detail", "局部精修"]];
 
 let detectorList = null;
 async function detectors() {
@@ -34,7 +38,9 @@ class Editor {
         this.selected = clamp(index ?? 0, 0, this.project.shots.length - 1);
         this.tab = "shot";
         this.frame = 0;
-        this.view = "auto";
+        this.view = null;
+        this.trim = null;
+        this.playing = false;
         this.paint = -1;
         this.boxing = -1;
     }
@@ -56,7 +62,8 @@ class Editor {
         this.screen = h("div.screen", {}, this.video, this.image, this.overlay, this.placeholder);
         this.viewport = h("div.viewport", {}, this.screen);
         this.painter = new Painter(this.overlay);
-        this.scrubber = h("input", { type: "range", min: 0, value: 0, oninput: e => this.seek(Number(e.target.value)) });
+        this.scrubber = h("input", { type: "range", min: 0, value: 0, oninput: e => { this.stopPlay(); this.seek(Number(e.target.value)); } });
+        this.trimBar = h("div.trimbar", { hidden: true });
         this.clock = h("span.dim", { style: { minWidth: "150px", textAlign: "right" } });
         this.playButton = h("button", { onclick: () => this.togglePlay(), title: "空格" }, "▶");
         this.toolbar = h("div.toolbar");
@@ -69,11 +76,13 @@ class Editor {
         const frame = h("div.frame", {},
             h("header", {},
                 h("strong", {}, "H3 导演台"), this.meta, h("span.grow"),
+                h("button", { onclick: () => this.importProject(), title: "从 JSON 文件导入镜头、参考和剧本（画幅、二采等在节点参数里）" }, "导入工程"),
+                h("button", { onclick: () => this.exportProject() }, "导出工程"),
                 h("button.primary", { onclick: () => this.run() }, "▶ 运行全片"),
                 h("button", { onclick: () => this.close(), title: "Esc" }, "关闭")),
             h("main", {},
                 h("section.stage", {}, this.viewport,
-                    h("div.transport", {}, this.playButton, this.scrubber, this.clock), this.toolbar),
+                    h("div.transport", {}, this.playButton, this.scrubber, this.clock), this.trimBar, this.toolbar),
                 h("aside", {}, this.tabs, this.pane)),
             h("footer", {}, this.footerTools, this.ruler, this.track));
         this.root.append(frame);
@@ -83,13 +92,14 @@ class Editor {
         this.resizer = new ResizeObserver(() => { this.fitScreen(); this.renderTimeline(); });
         this.resizer.observe(this.viewport);
         this.resizer.observe(this.track);
-        this.video.addEventListener("timeupdate", () => this.played());
+        this.video.addEventListener("loadedmetadata", () => this.renderTrim());
         this.video.addEventListener("loadeddata", () => this.showFrame());
         this.unlisten = this.panel.listen(() => this.renderTimeline());
         this.refresh();
     }
 
     close() {
+        this.stopPlay();
         this.video.pause();
         this.resizer.disconnect();
         this.unlisten();
@@ -101,8 +111,10 @@ class Editor {
         if (["INPUT", "TEXTAREA", "SELECT"].includes(e.target.tagName)) return;
         if (e.key === "Escape") { this.paint >= 0 || this.boxing >= 0 ? this.stopTools() : this.close(); }
         else if (e.key === " ") { e.preventDefault(); this.togglePlay(); }
-        else if (e.key === "ArrowLeft") this.seek(this.frame - (e.shiftKey ? FPS : 1));
-        else if (e.key === "ArrowRight") this.seek(this.frame + (e.shiftKey ? FPS : 1));
+        else if (e.key === "ArrowLeft") { this.stopPlay(); this.seek(this.frame - (e.shiftKey ? FPS : 1)); }
+        else if (e.key === "ArrowRight") { this.stopPlay(); this.seek(this.frame + (e.shiftKey ? FPS : 1)); }
+        else if (e.key === "i" || e.key === "I") this.markIn();
+        else if (e.key === "o" || e.key === "O") this.markOut();
         else if (e.key === "[" && this.paint >= 0) this.setBrush(this.painter.size * 0.8);
         else if (e.key === "]" && this.paint >= 0) this.setBrush(this.painter.size * 1.25);
     }
@@ -124,11 +136,13 @@ class Editor {
         this.renderFooterTools();
     }
 
-    select(index, frame = 0) {
+    select(index, frame = 0, playing = false) {
+        if (!playing) this.stopPlay();
         this.stopTools();
         this.selected = clamp(index, 0, this.project.shots.length - 1);
         this.frame = frame;
-        this.view = "auto";
+        this.view = null;
+        this.trim = null;
         this.refresh();
     }
 
@@ -140,14 +154,33 @@ class Editor {
 
     // ------------------------------------------------------------------ stage
 
+    /** The last render is on the stage only when chosen, or by default where repaints / details are drawn on it. */
+    showsResult() {
+        if (!this.result?.timeline?.some(e => e.id === this.shot.id)) return false;
+        if (this.view) return this.view === "result";
+        return this.shot.kind === "generate" && (this.tab === "repaint" || this.tab === "detail");
+    }
+
+    /** Storyboard frame of a generated shot: the last keyframe at or before kept frame ``frame``, else the first one. */
+    keyAt(frame) {
+        const keys = this.shot.keyframes.filter(k => mediaUrl(k.media))
+            .map(k => ({ ...k, pos: k.at === -1 ? this.win.keep - 1 : clamp(k.at, 0, this.win.keep - 1) })).sort((a, b) => a.pos - b.pos);
+        return keys.filter(k => k.pos <= frame).pop() || keys[0] || null;
+    }
+
+    /** What the stage shows at the playhead: the shot's material on the timeline, or the last render when chosen. */
     stageSource() {
         const shot = this.shot, entry = this.result?.timeline?.find(e => e.id === shot.id);
-        const sourceUrl = shot.kind === "source" ? mediaUrl(shot.source.media) : null;
-        if (entry && this.view !== "source") return { kind: "video", url: mediaUrl(this.result.video), base: entry.start, label: "上次成片", stale: entry.frames !== this.win.keep };
-        if (sourceUrl) return { kind: "video", url: sourceUrl, base: shot.source.start, label: "源视频" };
-        const first = [...shot.keyframes].sort((a, b) => (a.at === -1) - (b.at === -1) || a.at - b.at)[0];
-        if (first?.media && !first.media.input) return { kind: "image", url: mediaUrl(first.media), label: "首帧图" };
-        return { kind: "none" };
+        if (this.trim) {
+            const clip = this.trim.clip;
+            return { kind: "video", url: mediaUrl(clip.media), base: clip.start, label: `素材：参考视频 ${this.trim.tag}`, trim: clip, length: this.win.gen };
+        }
+        if (this.showsResult()) return { kind: "video", url: mediaUrl(this.result.video), base: entry.start, label: "上次成片", stale: entry.frames !== this.win.keep };
+        if (shot.kind === "source") {
+            const url = mediaUrl(shot.source.media);
+            return url ? { kind: "video", url, base: shot.source.start, label: "素材：源视频", trim: shot.source, length: this.win.keep } : { kind: "none" };
+        }
+        return { kind: "storyboard", label: "素材：关键帧" };
     }
 
     fitScreen() {
@@ -162,16 +195,16 @@ class Editor {
         this.fitScreen();
         const source = this.stage = this.stageSource();
         this.video.style.display = source.kind === "video" ? "" : "none";
-        this.image.style.display = source.kind === "image" ? "" : "none";
+        this.image.style.display = source.kind === "storyboard" ? "" : "none";
         this.placeholder.style.display = source.kind === "none" ? "" : "none";
-        this.placeholder.textContent = this.shot.kind === "source" ? "选择源视频后在这里预览。" : "运行后在这里预览本镜成片；在“首尾帧”里放一张首帧图可先看构图。";
+        this.placeholder.textContent = this.shot.source?.media?.input ? "连线的源视频要运行后才有画面：起点在“镜头”页按秒设置，运行后切到“成片”查看。"
+            : "选择源视频后，这里按时间线显示这一镜用到的素材。";
         if (source.kind === "video" && this.video.dataset.url !== source.url) {
             this.video.dataset.url = source.url;
             this.video.src = source.url;
-        } else if (source.kind === "image" && this.image.src !== source.url) {
-            this.image.src = source.url;
         }
         this.scrubber.max = Math.max(0, this.win.keep - 1);
+        this.renderTrim();
         this.seek(this.frame);
         this.renderToolbar();
         this.painter.boxes = this.tab === "detail" ? this.shot.details.map(d => d.box) : [];
@@ -185,51 +218,182 @@ class Editor {
         this.showFrame();
         this.renderClock();
         this.renderPlayhead();
+        this.renderTrimHead();
     }
 
     showFrame() {
-        if (this.stage?.kind !== "video" || !this.video.paused || !this.video.readyState) return;
-        const time = (this.stage.base + this.frame + 0.5) / FPS;
+        const stage = this.stage;
+        if (stage?.kind === "storyboard") {
+            const key = this.keyAt(this.frame), url = mediaUrl(key?.media);
+            // Preview the keyframe the way it meets the canvas; "auto" stretches the generation's first frame, crops the rest.
+            const mode = key && (key.fit !== "auto" ? key.fit : key.pos + this.win.head === 0 ? "stretch" : "crop");
+            this.image.style.objectFit = { crop: "cover", pad: "contain", stretch: "fill" }[mode] || "fill";
+            this.image.style.display = url ? "" : "none";
+            this.placeholder.style.display = url ? "none" : "";
+            if (!url) this.placeholder.textContent = "生成镜头还没有画面：在“首尾帧”放关键帧，就能按时间线预览构图；运行后可切到“成片”。";
+            else if (this.image.dataset.url !== url) { this.image.dataset.url = url; this.image.src = url; }
+            return;
+        }
+        if (stage?.kind !== "video" || !this.video.paused || !this.video.readyState) return;
+        const time = (stage.base + this.frame + 0.5) / FPS;
         if (Math.abs(this.video.currentTime - time) > 0.5 / FPS) this.video.currentTime = time;
     }
 
+    /** Plays the timeline from the playhead to the end of the film, shot after shot. */
     togglePlay() {
-        if (this.stage?.kind !== "video") return;
-        if (this.video.paused) {
-            if (this.frame >= this.win.keep - 1) this.seek(0);
+        if (this.playing) return this.stopPlay();
+        if (this.selected === this.project.shots.length - 1 && this.frame >= this.win.keep - 1) this.select(0);
+        this.playing = true;
+        this.playButton.textContent = "❚❚";
+        this.startClock();
+        requestAnimationFrame(now => this.tick(now));
+    }
+
+    stopPlay() {
+        if (!this.playing) return;
+        this.playing = false;
+        this.video.pause();
+        this.playButton.textContent = "▶";
+    }
+
+    /** Video material plays itself (with its sound); keyframes and empty shots follow a wall clock. */
+    startClock() {
+        this.clock0 = performance.now();
+        this.frame0 = this.frame;
+        if (this.stage.kind === "video") {
             this.video.currentTime = (this.stage.base + this.frame + 0.5) / FPS;
             this.video.muted = false;
-            this.video.play();
-            this.playButton.textContent = "❚❚";
-        } else {
-            this.video.pause();
-            this.playButton.textContent = "▶";
+            this.video.play().catch(() => this.stopPlay());
         }
     }
 
-    played() {
-        if (this.video.paused || this.stage?.kind !== "video") return;
-        const frame = Math.floor(this.video.currentTime * FPS) - this.stage.base;
+    tick(now) {
+        if (!this.playing) return;
+        const video = this.stage.kind === "video";
+        const frame = !video ? this.frame0 + Math.floor((now - this.clock0) * FPS / 1000)
+            : this.video.ended ? this.win.keep : Math.floor(this.video.currentTime * FPS) - this.stage.base;
         if (frame >= this.win.keep) {
-            this.video.pause();
-            this.playButton.textContent = "▶";
-            this.seek(this.win.keep - 1);
-            return;
+            if (this.selected + 1 >= this.project.shots.length) {
+                this.stopPlay();
+                this.seek(this.win.keep - 1);
+                return;
+            }
+            this.select(this.selected + 1, 0, true);
+            this.startClock();
+        } else if (frame !== this.frame) {
+            this.frame = Math.max(0, frame);
+            this.scrubber.value = this.frame;
+            if (!video) this.showFrame();
+            this.renderClock();
+            this.renderPlayhead();
+            this.renderTrimHead();
         }
-        this.frame = Math.max(0, frame);
-        this.scrubber.value = this.frame;
-        this.renderClock();
-        this.renderPlayhead();
+        requestAnimationFrame(t => this.tick(t));
     }
 
     renderClock() {
         const w = this.win;
-        this.clock.textContent = `第 ${this.frame + 1}/${w.keep} 帧 · ${secs(this.frame)} · 全片 ${secs(w.start + this.frame)}`;
+        const material = this.stage?.trim ? ` · 素材 ${clipTime(this.stage.trim.start + this.frame)}` : "";
+        this.clock.textContent = `第 ${this.frame + 1}/${w.keep} 帧 · ${secs(this.frame)} · 全片 ${secs(w.start + this.frame)}${material}`;
+    }
+
+    // ------------------------------------------------------------------ material trim
+
+    /** The whole clip under the stage: the highlighted part is what this shot (or reference) uses. */
+    renderTrim() {
+        const stage = this.stage, bar = this.trimBar;
+        bar.hidden = !stage?.trim;
+        this.trimTotal = 0;
+        if (!stage?.trim) return;
+        const duration = this.video.dataset.url === stage.url ? this.video.duration : NaN;
+        if (!Number.isFinite(duration) || duration <= 0) {
+            bar.replaceChildren(h("span.dim", {}, "读取素材时长…"));
+            return;
+        }
+        const clip = stage.trim, length = stage.length, total = this.trimTotal = Math.max(1, Math.floor(duration * FPS));
+        const source = clip === this.shot.source;
+        const pct = frames => `${clamp(frames / total, 0, 1) * 100}%`;
+        const win = h("div.window", { style: { left: pct(clip.start), width: pct(length) }, title: "拖动：选择用素材的哪一段" });
+        const lane = h("div.lane", { title: "点击：把选区移到这里" }, win);
+        this.trimHead = h("i.head");
+        lane.append(this.trimHead);
+        const info = h("span.dim", {}, `素材 ${clipTime(total)} · 使用 ${clipTime(clip.start)} – ${clipTime(clip.start + length)}（${secs(length)}）`);
+        const drag = (event, apply) => {
+            event.preventDefault();
+            event.stopPropagation();
+            this.stopPlay();
+            const x0 = event.clientX, perPixel = total / lane.clientWidth;
+            const move = e => {
+                apply(Math.round((e.clientX - x0) * perPixel));
+                win.style.left = pct(clip.start);
+                win.style.width = pct(stage.length);
+                stage.base = clip.start;
+                info.textContent = `素材 ${clipTime(total)} · 使用 ${clipTime(clip.start)} – ${clipTime(clip.start + stage.length)}（${secs(stage.length)}）`;
+                this.showFrame();
+                this.renderClock();
+                this.renderTrimHead();
+            };
+            const up = () => {
+                window.removeEventListener("pointermove", move);
+                window.removeEventListener("pointerup", up);
+                this.commit(true);
+            };
+            window.addEventListener("pointermove", move);
+            window.addEventListener("pointerup", up);
+            move(event);
+        };
+        const slide = event => {
+            const start0 = clip.start;
+            drag(event, delta => { clip.start = clamp(start0 + delta, 0, Math.max(0, total - length)); });
+        };
+        win.addEventListener("pointerdown", slide);
+        lane.addEventListener("pointerdown", e => {
+            if (e.target !== lane) return;
+            const x = e.clientX - lane.getBoundingClientRect().left;
+            clip.start = clamp(Math.round(x / lane.clientWidth * total - length / 2), 0, Math.max(0, total - length));
+            slide(e);
+        });
+        if (source) {
+            const out = h("i.out", { title: "拖动：出点（本镜时长）" });
+            out.addEventListener("pointerdown", e => {
+                const frames0 = this.shot.frames;
+                drag(e, delta => {
+                    this.shot.frames = clamp(frames0 + delta, 5, Math.max(5, total - clip.start));
+                    stage.length = this.win.keep;
+                });
+            });
+            win.append(out);
+        }
+        bar.replaceChildren(lane, h("div.row", {}, info, h("span.grow"),
+            source ? [h("button", { onclick: () => this.markIn(), title: "I" }, "当前帧设为入点"), h("button", { onclick: () => this.markOut(), title: "O" }, "当前帧设为出点")] : null));
+        this.renderTrimHead();
+    }
+
+    renderTrimHead() {
+        if (this.trimTotal && this.trimHead) this.trimHead.style.left = `${clamp((this.stage.trim.start + this.frame) / this.trimTotal, 0, 1) * 100}%`;
+    }
+
+    /** In point at the playhead; the out point stays where it was. */
+    markIn() {
+        const shot = this.shot;
+        if (shot.kind !== "source" || this.stage?.trim !== shot.source) return;
+        const out = shot.source.start + shot.frames;
+        shot.source.start += this.frame;
+        shot.frames = Math.max(5, out - shot.source.start);
+        this.frame = 0;
+        this.commit(true);
+    }
+
+    markOut() {
+        const shot = this.shot;
+        if (shot.kind !== "source" || this.stage?.trim !== shot.source) return;
+        shot.frames = Math.max(5, this.frame + 1);
+        this.commit(true);
     }
 
     async captureFrame() {
         const canvas = h("canvas", { width: this.project.width, height: this.project.height });
-        const source = this.stage?.kind === "video" ? this.video : this.stage?.kind === "image" ? this.image : null;
+        const source = this.stage?.kind === "video" ? this.video : this.stage?.kind === "storyboard" && this.image.style.display !== "none" ? this.image : null;
         if (!source) throw new Error("当前没有可截取的画面。");
         canvas.getContext("2d").drawImage(source, 0, 0, canvas.width, canvas.height);
         const blob = await new Promise(resolve => canvas.toBlob(resolve, "image/png"));
@@ -254,15 +418,20 @@ class Editor {
             bar.append(h("b", {}, `在画面上拖出精修 ${this.boxing + 1} 的区域`), h("span.grow"), h("button", { onclick: () => this.stopTools() }, "取消"));
             return;
         }
-        const source = this.stage || {};
+        if (this.trim) {
+            bar.append(h("b", {}, `截取参考视频 ${this.trim.tag}`), h("span.dim", {}, `拖动素材条上的选区，选出 H3 参考的那 ${secs(this.win.gen)}`), h("span.grow"),
+                h("button.primary", { onclick: () => { this.trim = null; this.renderStage(); this.renderInspector(); } }, "完成"));
+            return;
+        }
+        const source = this.stage || {}, result = this.showsResult();
         bar.append(h("span.dim", {}, source.label ? `显示：${source.label}` : "无画面"));
         if (source.stale) bar.append(h("span.warn", { style: { padding: "2px 8px" } }, "时长已改，成片与当前设置不一致，重新运行后更新"));
-        if (this.shot.kind === "source" && this.result?.timeline?.some(e => e.id === this.shot.id)) {
+        if (this.result?.timeline?.some(e => e.id === this.shot.id)) {
             bar.append(h("div.seg", {},
-                h(`button${this.view !== "source" ? ".on" : ""}`, { onclick: () => { this.view = "auto"; this.renderStage(); } }, "成片"),
-                h(`button${this.view === "source" ? ".on" : ""}`, { onclick: () => { this.view = "source"; this.renderStage(); } }, "源视频")));
+                h(`button${!result ? ".on" : ""}`, { onclick: () => { this.view = "material"; this.renderStage(); } }, "素材"),
+                h(`button${result ? ".on" : ""}`, { onclick: () => { this.view = "result"; this.renderStage(); } }, "成片")));
         }
-        bar.append(h("span.grow"), h("span.dim", {}, "空格播放 · ←/→ 逐帧 · Shift 加速"));
+        bar.append(h("span.grow"), h("span.dim", {}, source.trim ? "空格播放 · ←/→ 逐帧 · I / O 设入点 / 出点" : "空格播放全片 · ←/→ 逐帧 · Shift 加速"));
     }
 
     setBrush(size) {
@@ -327,8 +496,9 @@ class Editor {
 
     renderMeta() {
         const p = this.project, total = totalFrames(p);
-        const out = p.refine.enabled ? ` → 二采 ${Math.round(p.width * p.refine.scale / 32) * 32}×${Math.round(p.height * p.refine.scale / 32) * 32}` : "";
-        this.meta.textContent = `${p.width}×${p.height}${out} · ${p.shots.length} 镜 · ${secs(total)} · 24fps`;
+        const draft = size => Math.max(64, Math.round(size / p.refine.scale / 32) * 32);
+        const refine = p.refine.enabled ? ` · ${p.refine.mode === "two_pass" ? "两段式二采" : "放大二采"}：首采 ${draft(p.width)}×${draft(p.height)}` : "";
+        this.meta.textContent = `${p.width}×${p.height}${refine} · ${p.shots.length} 镜 · ${secs(total)} · 24fps`;
     }
 
     renderFooterTools() {
@@ -398,6 +568,7 @@ class Editor {
                 "data-state": state === "complete" ? "complete" : state ? "running" : "",
                 title: `${shot.prompt || "（无提示词）"}\n${secs(w.keep)}${state ? ` · ${STAGES[state] || state}` : ""}`,
                 onclick: e => {
+                    this.stopPlay();
                     const local = Math.floor((e.clientX - block.getBoundingClientRect().left) / scale);
                     w.index === this.selected ? this.seek(local) : this.select(w.index, clamp(local, 0, w.keep - 1));
                 },
@@ -475,7 +646,7 @@ class Editor {
     }
 
     renderInspector() {
-        const builders ={ story: this.storyPane, shot: this.shotPane, keys: this.keysPane, refs: this.refsPane, repaint: this.repaintPane, detail: this.detailPane, project: this.projectPane };
+        const builders = { story: this.storyPane, shot: this.shotPane, keys: this.keysPane, refs: this.refsPane, repaint: this.repaintPane, detail: this.detailPane };
         this.pane.replaceChildren(...[builders[this.tab].call(this)].flat(3).filter(child => child != null && child !== false));
         this.renderTabs();
     }
@@ -532,7 +703,8 @@ class Editor {
     }
 
     /** Media slot: click to upload, drop a file, pick a graph input, or capture the stage frame. */
-    slot(media, { accept = "image/*", tag, graph = "image", capture = false, onpick }) {
+    /** Upload / drop target; ``graph`` lists the socket kinds offered as connected material (e.g. ["video", "image"]). */
+    slot(media, { accept = "image/*", tag, graph = ["image"], capture = false, onpick }) {
         const url = mediaUrl(media);
         const el = h(`div.slot${media ? ".filled" : ""}`, { title: media ? mediaLabel(media) : "点击上传，或把文件拖到这里" });
         if (media && url && isVideo(media)) el.append(h("video", { src: url, muted: true, preload: "metadata" }));
@@ -550,11 +722,11 @@ class Editor {
         el.addEventListener("drop", e => { e.preventDefault(); el.classList.remove("drop"); choose(e.dataTransfer.files?.[0]); });
         if (media) el.append(h("button.x", { onclick: e => { e.stopPropagation(); onpick(null); }, title: "移除" }, "✕"));
         const extras = [];
-        const inputs = graph ? graphInputs(this.node, graph) : [];
+        const inputs = graphInputs(this.node, ...graph);
         if (inputs.length) {
             extras.push(h("select", {
                 onchange: e => { if (e.target.value) onpick({ input: e.target.value }); },
-            }, h("option", { value: "" }, "图输入…"), ...inputs.map(i => h("option", { value: i.input, selected: media?.input === i.input }, i.label))));
+            }, h("option", { value: "" }, "连线素材…"), ...inputs.map(i => h("option", { value: i.input, selected: media?.input === i.input }, i.label))));
         }
         if (capture) extras.push(h("button", { onclick: async () => { try { onpick(await this.captureFrame()); } catch (error) { alert(error.message); } } }, "截取当前画面"));
         return h("div.field", {}, el, extras.length ? h("div.row", {}, ...extras) : null);
@@ -599,8 +771,10 @@ class Editor {
             this.seg([["generate", "生成"], ["source", "源视频"]], shot.kind, kind => this.setKind(kind))));
         if (shot.kind === "source") {
             parts.push(this.field("源视频（24fps 时间轴，可为任意帧率）",
-                this.slot(shot.source.media, { accept: "video/*", graph: "image", onpick: m => { shot.source.media = m; this.commit(true); } })));
-            parts.push(this.field("起点（秒）", this.number(shot.source, "start", { min: 0, step: 1 / FPS, scale: FPS })));
+                this.slot(shot.source.media, { accept: "video/*", graph: ["video", "image"], onpick: m => { shot.source.media = m; this.commit(true); } })));
+            parts.push(this.field("起点（秒）", this.number(shot.source, "start", { min: 0, step: 1 / FPS, scale: FPS, after: () => this.renderStage() })));
+            parts.push(h("div.dim", {}, shot.source.media?.input ? "连线的源视频在运行前看不到画面，按秒设置起点。"
+                : "剪辑素材：在舞台下方的素材条上拖动选区，选出这一镜用到的那一段；拖选区右缘改时长，或播放到某一帧按 I / O 设入点 / 出点。"));
             parts.push(this.field("改写方式", this.seg([[false, "保留原画 · 只改遮罩"], [true, "整体改写（参考 <Video 1>）"]], shot.source.regen,
                 v => { shot.source.regen = v; this.commit(true); })));
             if (shot.source.regen) {
@@ -641,7 +815,10 @@ class Editor {
         parts.push(this.field("声音", h("select", {
             onchange: e => { shot.audio = e.target.value; this.commit(true); },
         }, ...audioModes.map(m => h("option", { value: m, selected: shot.audio === m }, AUDIO_LABELS[m])))));
-        if (shot.audio === "soundtrack" && !this.project.soundtrack) parts.push(h("div.warn", {}, "在“工程”里先设置配乐音轨。"));
+        if (shot.audio === "soundtrack") {
+            parts.push(this.field("配乐音轨（全片共用：按时间线切到每个选了配乐的镜头）",
+                this.slot(this.project.soundtrack, { accept: "audio/*,video/*", graph: ["audio", "video"], onpick: m => { this.project.soundtrack = m; this.commit(true); } })));
+        }
         parts.push(h("div.row", {}, this.reseed(shot), this.project.refine.enabled ? this.check(shot, "refine", "参与二采") : null));
         return parts;
     }
@@ -689,6 +866,7 @@ class Editor {
                     auto && shot.prompt ? h("div.dim", {}, `片段提示词：${shot.prompt}`) : null,
                     h("div.report", {}, text || (auto ? "（运行或点“生成剧本”后显示）" : "（空）")));
             }),
+            this.result?.report?.length ? [h("b", {}, "上次运行"), h("div.report", {}, this.result.report.join("\n"))] : null,
         ];
     }
 
@@ -706,10 +884,12 @@ class Editor {
         const shot = this.shot, w = this.win;
         const find = at => shot.keyframes.find(k => k.at === at);
         const put = (at, media) => {
+            const fit = find(at)?.fit || "auto";
             shot.keyframes = shot.keyframes.filter(k => k.at !== at);
-            if (media) shot.keyframes.push({ at, media });
+            if (media) shot.keyframes.push({ at, media, fit });
             this.commit(true);
         };
+        const ends = [[0, "首帧"], [-1, "尾帧"]].filter(([at]) => find(at));
         const middles = shot.keyframes.filter(k => k.at !== 0 && k.at !== -1).sort((a, b) => a.at - b.at);
         const referenced = refCount(effectiveRefs(this.project, shot)) > 0 || (shot.kind === "source" && shot.source.regen);
         return [
@@ -720,23 +900,32 @@ class Editor {
             h("div.slots", {},
                 this.slot(find(0)?.media, { tag: "首帧", capture: true, onpick: m => put(0, m) }),
                 this.slot(find(-1)?.media, { tag: "尾帧", capture: true, onpick: m => put(-1, m) })),
+            ends.length ? h("div.row", {}, ...ends.map(([at, label]) => h("label.row", {}, label, this.fitSelect(find(at), "自动（首帧拉伸，其余裁剪）")))) : null,
             h("b", {}, "中间关键帧"),
             ...middles.map(k => h("div.card", {},
                 h("div.row", {}, h("span", {}, "第"), this.number(k, "at", { min: 1, max: w.keep - 2, after: () => this.commit(true) }), h("span", {}, `帧（${secs(k.at)}）`),
                     h("span.grow"), h("button.danger", { onclick: () => { shot.keyframes.splice(shot.keyframes.indexOf(k), 1); this.commit(true); } }, "删除")),
-                this.slot(k.media, { capture: true, onpick: m => { if (m) { k.media = m; } else { shot.keyframes.splice(shot.keyframes.indexOf(k), 1); } this.commit(true); } }))),
+                this.slot(k.media, { capture: true, onpick: m => { if (m) { k.media = m; } else { shot.keyframes.splice(shot.keyframes.indexOf(k), 1); } this.commit(true); } }),
+                h("label.row", {}, "适配画幅", this.fitSelect(k, "自动（裁剪）")))),
             h("button", {
                 onclick: async () => {
                     const at = clamp(this.frame, 1, w.keep - 2);
                     let media = null;
                     try { media = await this.captureFrame(); } catch { media = null; }
                     if (!media) { const file = await pickFile("image/*"); if (!file) return; media = await upload(file); }
-                    shot.keyframes.push({ at, media });
+                    shot.keyframes.push({ at, media, fit: "auto" });
                     this.commit(true);
                 },
             }, `+ 在当前帧（第 ${this.frame + 1} 帧）加关键帧`),
             h("div.dim", {}, "提示：“截取当前画面”可以把上一镜成片的最后一帧拿来做下一镜首帧，用于硬切后的人物衔接。"),
         ];
+    }
+
+    /** How an image meets the canvas; "auto" is H3's own rule for that slot. */
+    fitSelect(item, auto) {
+        return h("select", { title: "适配画幅：裁剪填满 / 补黑边 / 拉伸变形", onchange: e => { item.fit = e.target.value; this.commit(true); } },
+            ...[["auto", auto], ["crop", "裁剪填满"], ["pad", "补边（黑边）"], ["stretch", "拉伸"]].map(([value, label]) =>
+                h("option", { value, selected: (item.fit || "auto") === value }, label)));
     }
 
     /** Upload slots for one reference set; ``offset`` is where its <Picture N> / <Video N> numbering starts. */
@@ -745,14 +934,19 @@ class Editor {
             this.slot(null, { ...options, onpick: m => { if (m) { items.push(options.wrap ? options.wrap(m) : m); this.commit(true); } } }));
         return [
             h("span.dim", {}, `图片 ${refs.images.length}`),
-            list(refs.images, { accept: "image/*" }, (m, i) => this.slot(m, { tag: `<Picture ${offset.images + i + 1}>`,
-                onpick: v => { v ? (refs.images[i] = v) : refs.images.splice(i, 1); this.commit(true); } })),
+            list(refs.images, { accept: "image/*", wrap: m => ({ media: m, fit: "auto" }) }, (m, i) => h("div.field", {},
+                this.slot(m.media, { tag: `<Picture ${offset.images + i + 1}>`, onpick: v => { v ? (m.media = v) : refs.images.splice(i, 1); this.commit(true); } }),
+                this.fitSelect(m, "原比例"))),
             h("span.dim", {}, `视频 ${refs.videos.length}`),
-            list(refs.videos, { accept: "video/*", wrap: m => ({ media: m, audio: false }) }, (v, i) => h("div.field", {},
-                this.slot(v.media, { accept: "video/*", tag: `<Video ${offset.videos + i + 1}>`, onpick: m => { m ? (v.media = m) : refs.videos.splice(i, 1); this.commit(true); } }),
-                this.check(v, "audio", "带原声", () => this.commit(true)))),
+            list(refs.videos, { accept: "video/*", graph: ["video", "image"], wrap: m => ({ media: m, audio: false, start: 0 }) }, (v, i) => h("div.field", {},
+                this.slot(v.media, { accept: "video/*", graph: ["video", "image"], tag: `<Video ${offset.videos + i + 1}>`,
+                    onpick: m => { m ? (v.media = m) : refs.videos.splice(i, 1); this.commit(true); } }),
+                this.check(v, "audio", "带原声", () => this.commit(true)),
+                h("div.row", {}, "起点", this.number(v, "start", { min: 0, step: 1 / FPS, scale: FPS, after: () => this.renderStage() }), "秒",
+                    mediaUrl(v.media) ? h("button", { onclick: () => { this.stopTools(); this.trim = { clip: v, tag: `<Video ${offset.videos + i + 1}>` }; this.renderStage(); },
+                        title: "在舞台下方的素材条上选择参考的片段" }, "截取") : null))),
             h("span.dim", {}, `音频 ${refs.audios.length}`),
-            list(refs.audios, { accept: "audio/*,video/*", graph: null }, (m, i) => this.slot(m, { accept: "audio/*,video/*", graph: null, tag: "音频",
+            list(refs.audios, { accept: "audio/*,video/*", graph: ["audio", "video"] }, (m, i) => this.slot(m, { accept: "audio/*,video/*", graph: ["audio", "video"], tag: "音频",
                 onpick: v => { v ? (refs.audios[i] = v) : refs.audios.splice(i, 1); this.commit(true); } })),
         ];
     }
@@ -767,6 +961,7 @@ class Editor {
             ...this.refSlots(p.refs, { images: 0, videos: source }),
             h("b", {}, `第 ${this.selected + 1} 镜参考`),
             this.check(shot, "inherit_refs", "继承全局参考（关掉则这一镜只用下面自己的参考）", () => this.commit(true)),
+            this.field("参考强度（整镜：参考图、参考视频和关键帧一起；1 = 官方默认，越低越不受约束）", this.slider(shot, "ref_strength", 0.3, 1, 0.05)),
             source ? h("div.dim", {}, "整体改写时源视频是 <Video 1>，参考视频接在它后面编号。") : null,
             shared.images || shared.videos ? h("div.dim", {}, "本镜参考的编号接在全局参考之后。") : null,
             ...this.refSlots(shot.refs, { images: shared.images, videos: shared.videos + source }),
@@ -824,8 +1019,19 @@ class Editor {
                 this.field("精修提示词（留空沿用镜头提示词）", h("textarea", { rows: 3, value: item.prompt, placeholder: "例如：清晰的面部特写，皮肤细节自然", oninput: e => { item.prompt = e.target.value; this.commit(); } })),
                 this.reseed(item));
         });
+        const master = widget(this.node, "detail");
+        const rendered = this.result?.timeline?.some(e => e.id === shot.id);
         return [
-            h("div.note", {}, "局部精修在成片上裁出区域、放大后低强度重采样，再羽化贴回（脸、手、小物体）。“跟随人脸”从框内的人脸开始跟踪，适合多人画面。"),
+            h("div.note", {}, "局部精修把成片里的一块区域（脸、手、小物体）裁出来放大，低强度重新采样后羽化贴回，让细节更清楚。"),
+            h("div.card", {}, h("b", {}, "用法"),
+                h("div", {}, "① 先运行一次，得到本镜成片。"),
+                h("div", {}, "② 点下面“+ 新建精修区域”，在舞台的成片上拖出一个框；人物在动就选“跟随人脸”。"),
+                h("div", {}, "③ 调精修强度后再运行：镜头读缓存，只重跑精修。")),
+            master ? h("label.row", {}, h("input", { type: "checkbox", checked: !!master.value,
+                onchange: e => { master.value = e.target.checked; changed(); this.project.detail.enabled = master.value; this.renderInspector(); } }),
+                "局部精修总开关（节点参数 detail）") : null,
+            master && !master.value ? h("div.warn", {}, "总开关已关闭：下面的精修区域运行时都会跳过。") : null,
+            !rendered && shot.kind === "generate" ? h("div.warn", {}, "本镜还没有成片：可以先按关键帧构图框选，运行一次后在成片上框更准。") : null,
             ...cards,
             h("button", { onclick: () => {
                 shot.details.push({ id: uid(), enabled: true, box: [0.3, 0.15, 0.4, 0.5], follow: "none", detector: "face_yolov8m.pt", start: 0, end: -1, prompt: "", denoise: 0.4, megapixels: 0.5, seed: 0 });
@@ -835,48 +1041,8 @@ class Editor {
         ];
     }
 
-    projectPane() {
-        const p = this.project;
-        const aspect = p.width / p.height;
-        const current = ASPECTS.find(([, a]) => Math.abs(a - aspect) < 0.02)?.[0] || "custom";
-        const mp = Number((p.width * p.height / 1e6).toFixed(2));
-        const setCanvas = (a, m) => { [p.width, p.height] = canvasFor(a, m); this.commit(true); };
-        const refineOut = `${Math.round(p.width * p.refine.scale / 32) * 32}×${Math.round(p.height * p.refine.scale / 32) * 32}`;
-        const report = this.result?.report;
-        return [
-            h("b", {}, "画面"),
-            this.field("画幅", this.seg(ASPECTS.map(([name]) => [name, name]), current, name => setCanvas(ASPECTS.find(a => a[0] === name)[1], mp))),
-            this.field(`首采像素量：${p.width}×${p.height}（${mp} MP）`, h("input", {
-                type: "range", min: 0.2, max: 1.05, step: 0.01, value: mp, onchange: e => setCanvas(aspect, Number(e.target.value)),
-            })),
-            h("div.row", {}, this.field("宽", this.number(p, "width", { min: 64, max: 4096, step: 32, multiple: 32, after: () => this.commit(true) })),
-                this.field("高", this.number(p, "height", { min: 64, max: 4096, step: 32, multiple: 32, after: () => this.commit(true) }))),
-            this.field("续接重叠帧", h("select", { onchange: e => { p.overlap = Number(e.target.value); this.commit(true); } },
-                ...OVERLAPS.map(v => h("option", { value: v, selected: p.overlap === v }, v ? `${v} 帧（${secs(v)}）` : "关闭续接")))),
-            this.field("参考图尺寸", this.seg([["match", "匹配画面"], ["max", "最高清（慢）"]], p.ref_image_size, v => { p.ref_image_size = v; this.commit(true); })),
-            this.field("配乐音轨（镜头声音选“配乐音轨”时按时间线切分并锁定）",
-                this.slot(p.soundtrack, { accept: "audio/*,video/*", graph: null, onpick: m => { p.soundtrack = m; this.commit(true); } })),
-            this.field("负面提示词（cfg ≠ 1 时生效）", h("textarea", { rows: 2, value: p.negative_prompt, oninput: e => { p.negative_prompt = e.target.value; this.commit(); } })),
-            h("b", {}, "二采放大"),
-            this.check(p.refine, "enabled", "开启二采（全片放大后低强度再采样）", () => this.commit(true)),
-            p.refine.enabled ? [
-                this.field(`放大倍数 → ${refineOut}`, this.slider(p.refine, "scale", 1, 2.5, 0.125, v => `${v.toFixed(3)}×`)),
-                this.field("放大方式", this.seg([["lanczos", "Lanczos"], ["model", "放大模型（接 upscale_model）"]], p.refine.upscaler, v => { p.refine.upscaler = v; this.commit(true); })),
-                h("div.row", {}, this.field("二采步数", this.number(p.refine, "steps", { min: 1, max: 200 })),
-                    this.field("二采强度", this.number(p.refine, "denoise", { min: 0.05, max: 1, step: 0.05 }))),
-            ] : null,
-            h("b", {}, "局部精修"),
-            this.field("精修步数", this.number(p.detail, "steps", { min: 1, max: 200 })),
-            h("b", {}, "工程"),
-            h("div.row", {},
-                h("button", { onclick: () => this.exportProject() }, "导出工程 JSON"),
-                h("button", { onclick: () => this.importProject() }, "导入工程 JSON")),
-            report?.length ? [h("b", {}, "上次运行"), h("div.report", {}, report.join("\n"))] : null,
-        ].flat();
-    }
-
     exportProject() {
-        const blob = new Blob([JSON.stringify(this.project, null, 2)], { type: "application/json" });
+        const blob = new Blob([JSON.stringify(projectData(this.project), null, 2)], { type: "application/json" });
         const link = h("a", { href: URL.createObjectURL(blob), download: "yogurt_h3_project.json" });
         link.click();
         URL.revokeObjectURL(link.href);

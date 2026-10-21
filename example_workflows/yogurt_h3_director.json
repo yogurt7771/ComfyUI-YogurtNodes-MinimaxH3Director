@@ -402,7 +402,7 @@
       ],
       "size": [
         564,
-        696
+        1094
       ],
       "flags": {},
       "order": 12,
@@ -496,6 +496,20 @@
           "link": null
         },
         {
+          "localized_name": "video_0",
+          "name": "videos.video_0",
+          "shape": 7,
+          "type": "VIDEO",
+          "link": null
+        },
+        {
+          "localized_name": "audio_0",
+          "name": "audios.audio_0",
+          "shape": 7,
+          "type": "AUDIO",
+          "link": null
+        },
+        {
           "localized_name": "seed",
           "name": "seed",
           "type": "INT",
@@ -557,6 +571,114 @@
             "name": "project"
           },
           "link": null
+        },
+        {
+          "localized_name": "width",
+          "name": "width",
+          "type": "INT",
+          "widget": {
+            "name": "width"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "height",
+          "name": "height",
+          "type": "INT",
+          "widget": {
+            "name": "height"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "overlap",
+          "name": "overlap",
+          "type": "COMBO",
+          "widget": {
+            "name": "overlap"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "ref_image_size",
+          "name": "ref_image_size",
+          "type": "COMBO",
+          "widget": {
+            "name": "ref_image_size"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "negative_prompt",
+          "name": "negative_prompt",
+          "type": "STRING",
+          "widget": {
+            "name": "negative_prompt"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "refine",
+          "name": "refine",
+          "type": "BOOLEAN",
+          "widget": {
+            "name": "refine"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "refine_scale",
+          "name": "refine_scale",
+          "type": "FLOAT",
+          "widget": {
+            "name": "refine_scale"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "refine_upscaler",
+          "name": "refine_upscaler",
+          "type": "COMBO",
+          "widget": {
+            "name": "refine_upscaler"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "refine_steps",
+          "name": "refine_steps",
+          "type": "INT",
+          "widget": {
+            "name": "refine_steps"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "refine_denoise",
+          "name": "refine_denoise",
+          "type": "FLOAT",
+          "widget": {
+            "name": "refine_denoise"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "detail",
+          "name": "detail",
+          "type": "BOOLEAN",
+          "widget": {
+            "name": "detail"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "detail_steps",
+          "name": "detail_steps",
+          "type": "INT",
+          "widget": {
+            "name": "detail_steps"
+          },
+          "link": null
         }
       ],
       "outputs": [
@@ -578,7 +700,20 @@
         "euler",
         "simple",
         "yogurt_h3/director",
-        "{\"version\":1,\"width\":1344,\"height\":768,\"overlap\":22,\"negative_prompt\":\"\",\"ref_image_size\":\"match\",\"soundtrack\":null,\"refine\":{\"enabled\":false,\"scale\":1.5,\"upscaler\":\"lanczos\",\"steps\":3,\"denoise\":0.3},\"detail\":{\"steps\":3},\"shots\":[{\"id\":\"open\",\"kind\":\"generate\",\"frames\":120,\"prompt\":\"A young woman with short black hair in a red raincoat walks along a rainy neon-lit street at night. The camera tracks beside her at shoulder height. Rain patters on the pavement and distant traffic hums.\",\"continue\":false,\"seed\":0,\"keyframes\":[],\"refs\":{\"images\":[],\"videos\":[],\"audios\":[]},\"source\":null,\"audio\":\"generate\",\"repaints\":[],\"details\":[],\"refine\":true},{\"id\":\"turn\",\"kind\":\"generate\",\"frames\":96,\"prompt\":\"She stops under a flickering sign, turns toward the camera and smiles softly. Neon reflections shimmer in the puddles while the rain keeps falling.\",\"continue\":true,\"seed\":0,\"keyframes\":[],\"refs\":{\"images\":[],\"videos\":[],\"audios\":[]},\"source\":null,\"audio\":\"generate\",\"repaints\":[],\"details\":[],\"refine\":true},{\"id\":\"cafe\",\"kind\":\"generate\",\"frames\":96,\"prompt\":\"Inside a warm, quiet cafe, the same young woman in the red raincoat sits by the window holding a cup of coffee and watches the rain outside. Soft jazz plays.\",\"continue\":false,\"seed\":0,\"keyframes\":[],\"refs\":{\"images\":[],\"videos\":[],\"audios\":[]},\"source\":null,\"audio\":\"generate\",\"repaints\":[],\"details\":[],\"refine\":true}],\"story\":\"雨夜，穿红雨衣的短发女孩独自走在霓虹街头。她在一块闪烁的招牌下停下，回头对镜头轻轻一笑。随后她走进一家温暖安静的咖啡馆，在窗边坐下，捧着咖啡看窗外的雨。\",\"rewrite\":{\"enabled\":false,\"notes\":\"写实电影感，镜头克制；台词（如果有）用中文。\",\"seed\":0}}"
+        "{\"version\":1,\"soundtrack\":null,\"shots\":[{\"id\":\"open\",\"kind\":\"generate\",\"frames\":120,\"prompt\":\"A young woman with short black hair in a red raincoat walks along a rainy neon-lit street at night. The camera tracks beside her at shoulder height. Rain patters on the pavement and distant traffic hums.\",\"continue\":false,\"seed\":0,\"keyframes\":[],\"refs\":{\"images\":[],\"videos\":[],\"audios\":[]},\"source\":null,\"audio\":\"generate\",\"repaints\":[],\"details\":[],\"refine\":true},{\"id\":\"turn\",\"kind\":\"generate\",\"frames\":96,\"prompt\":\"She stops under a flickering sign, turns toward the camera and smiles softly. Neon reflections shimmer in the puddles while the rain keeps falling.\",\"continue\":true,\"seed\":0,\"keyframes\":[],\"refs\":{\"images\":[],\"videos\":[],\"audios\":[]},\"source\":null,\"audio\":\"generate\",\"repaints\":[],\"details\":[],\"refine\":true},{\"id\":\"cafe\",\"kind\":\"generate\",\"frames\":96,\"prompt\":\"Inside a warm, quiet cafe, the same young woman in the red raincoat sits by the window holding a cup of coffee and watches the rain outside. Soft jazz plays.\",\"continue\":false,\"seed\":0,\"keyframes\":[],\"refs\":{\"images\":[],\"videos\":[],\"audios\":[]},\"source\":null,\"audio\":\"generate\",\"repaints\":[],\"details\":[],\"refine\":true}],\"story\":\"雨夜，穿红雨衣的短发女孩独自走在霓虹街头。她在一块闪烁的招牌下停下，回头对镜头轻轻一笑。随后她走进一家温暖安静的咖啡馆，在窗边坐下，捧着咖啡看窗外的雨。\",\"rewrite\":{\"enabled\":false,\"notes\":\"写实电影感，镜头克制；台词（如果有）用中文。\",\"seed\":0}}",
+        1344,
+        768,
+        "22",
+        "match",
+        "",
+        "off",
+        2.0,
+        "h3_latent",
+        "minimax_h3_latent_upscaler_3d_conv_v1_fp16.safetensors",
+        2,
+        0.35,
+        true,
+        3
       ],
       "widgets_values_named": {
         "seed": 0,
@@ -588,7 +723,20 @@
         "sampler_name": "euler",
         "scheduler": "simple",
         "filename_prefix": "yogurt_h3/director",
-        "project": "{\"version\":1,\"width\":1344,\"height\":768,\"overlap\":22,\"negative_prompt\":\"\",\"ref_image_size\":\"match\",\"soundtrack\":null,\"refine\":{\"enabled\":false,\"scale\":1.5,\"upscaler\":\"lanczos\",\"steps\":3,\"denoise\":0.3},\"detail\":{\"steps\":3},\"shots\":[{\"id\":\"open\",\"kind\":\"generate\",\"frames\":120,\"prompt\":\"A young woman with short black hair in a red raincoat walks along a rainy neon-lit street at night. The camera tracks beside her at shoulder height. Rain patters on the pavement and distant traffic hums.\",\"continue\":false,\"seed\":0,\"keyframes\":[],\"refs\":{\"images\":[],\"videos\":[],\"audios\":[]},\"source\":null,\"audio\":\"generate\",\"repaints\":[],\"details\":[],\"refine\":true},{\"id\":\"turn\",\"kind\":\"generate\",\"frames\":96,\"prompt\":\"She stops under a flickering sign, turns toward the camera and smiles softly. Neon reflections shimmer in the puddles while the rain keeps falling.\",\"continue\":true,\"seed\":0,\"keyframes\":[],\"refs\":{\"images\":[],\"videos\":[],\"audios\":[]},\"source\":null,\"audio\":\"generate\",\"repaints\":[],\"details\":[],\"refine\":true},{\"id\":\"cafe\",\"kind\":\"generate\",\"frames\":96,\"prompt\":\"Inside a warm, quiet cafe, the same young woman in the red raincoat sits by the window holding a cup of coffee and watches the rain outside. Soft jazz plays.\",\"continue\":false,\"seed\":0,\"keyframes\":[],\"refs\":{\"images\":[],\"videos\":[],\"audios\":[]},\"source\":null,\"audio\":\"generate\",\"repaints\":[],\"details\":[],\"refine\":true}],\"story\":\"雨夜，穿红雨衣的短发女孩独自走在霓虹街头。她在一块闪烁的招牌下停下，回头对镜头轻轻一笑。随后她走进一家温暖安静的咖啡馆，在窗边坐下，捧着咖啡看窗外的雨。\",\"rewrite\":{\"enabled\":false,\"notes\":\"写实电影感，镜头克制；台词（如果有）用中文。\",\"seed\":0}}"
+        "project": "{\"version\":1,\"soundtrack\":null,\"shots\":[{\"id\":\"open\",\"kind\":\"generate\",\"frames\":120,\"prompt\":\"A young woman with short black hair in a red raincoat walks along a rainy neon-lit street at night. The camera tracks beside her at shoulder height. Rain patters on the pavement and distant traffic hums.\",\"continue\":false,\"seed\":0,\"keyframes\":[],\"refs\":{\"images\":[],\"videos\":[],\"audios\":[]},\"source\":null,\"audio\":\"generate\",\"repaints\":[],\"details\":[],\"refine\":true},{\"id\":\"turn\",\"kind\":\"generate\",\"frames\":96,\"prompt\":\"She stops under a flickering sign, turns toward the camera and smiles softly. Neon reflections shimmer in the puddles while the rain keeps falling.\",\"continue\":true,\"seed\":0,\"keyframes\":[],\"refs\":{\"images\":[],\"videos\":[],\"audios\":[]},\"source\":null,\"audio\":\"generate\",\"repaints\":[],\"details\":[],\"refine\":true},{\"id\":\"cafe\",\"kind\":\"generate\",\"frames\":96,\"prompt\":\"Inside a warm, quiet cafe, the same young woman in the red raincoat sits by the window holding a cup of coffee and watches the rain outside. Soft jazz plays.\",\"continue\":false,\"seed\":0,\"keyframes\":[],\"refs\":{\"images\":[],\"videos\":[],\"audios\":[]},\"source\":null,\"audio\":\"generate\",\"repaints\":[],\"details\":[],\"refine\":true}],\"story\":\"雨夜，穿红雨衣的短发女孩独自走在霓虹街头。她在一块闪烁的招牌下停下，回头对镜头轻轻一笑。随后她走进一家温暖安静的咖啡馆，在窗边坐下，捧着咖啡看窗外的雨。\",\"rewrite\":{\"enabled\":false,\"notes\":\"写实电影感，镜头克制；台词（如果有）用中文。\",\"seed\":0}}",
+        "width": 1344,
+        "height": 768,
+        "overlap": "22",
+        "ref_image_size": "match",
+        "negative_prompt": "",
+        "refine": "off",
+        "refine_scale": 2.0,
+        "refine_upscaler": "h3_latent",
+        "refine_latent_model": "minimax_h3_latent_upscaler_3d_conv_v1_fp16.safetensors",
+        "refine_steps": 2,
+        "refine_denoise": 0.35,
+        "detail": true,
+        "detail_steps": 3
       }
     },
     {
@@ -778,7 +926,7 @@
         82
       ],
       "flags": {},
-      "order": 10,
+      "order": 11,
       "mode": 0,
       "inputs": [
         {
@@ -837,11 +985,11 @@
         150
       ],
       "size": [
-        270,
+        383.9732421875,
         82
       ],
       "flags": {},
-      "order": 11,
+      "order": 10,
       "mode": 0,
       "inputs": [
         {

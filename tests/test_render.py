@@ -1,6 +1,7 @@
 import json
 from pathlib import Path
 import tempfile
+from types import SimpleNamespace
 import unittest
 
 import av
@@ -8,11 +9,12 @@ import numpy as np
 from PIL import Image
 import torch
 
-from support import FakeSampler, load, models, write_video
+from support import FakeAudioVAE, FakeClip, FakeSampler, FakeVAE, load, models, tiny_upscaler, write_video
 
 director = load()
 render = director.render
 import folder_paths  # noqa: E402
+from comfy_api.latest import InputImpl  # noqa: E402
 
 
 def png(path, value, size=(128, 64), left_half=False):
@@ -33,20 +35,20 @@ class RenderTests(unittest.TestCase):
         folder_paths.set_output_directory(str(self.root / "output"))
         folder_paths.set_input_directory(str(self.root / "input"))
         self.fake = FakeSampler()
-        self.saved = render.sampling.sample, render.sampling.schedule, render.install_drift_control
-        render.sampling.sample, render.sampling.schedule = self.fake.sample, self.fake.schedule
+        self.saved = render.sampling.sample, render.sampling.schedule, render.sampling.trajectory_noise, render.install_drift_control
+        render.sampling.sample, render.sampling.schedule, render.sampling.trajectory_noise = self.fake.sample, self.fake.schedule, self.fake.trajectory_noise
         self.drift = []
         render.install_drift_control = lambda model, latent, sigmas, tokens: self.drift.append(tokens) or model
 
     def tearDown(self):
-        render.sampling.sample, render.sampling.schedule, render.install_drift_control = self.saved
+        render.sampling.sample, render.sampling.schedule, render.sampling.trajectory_noise, render.install_drift_control = self.saved
         folder_paths.set_output_directory(self.saved_dirs[0])
         folder_paths.set_input_directory(self.saved_dirs[1])
         self.tmp.cleanup()
 
-    def run_project(self, data, **kwargs):
-        spec = director.project.load_project(json.dumps({"width": 128, "height": 64, **data}))
-        job = render.Render("7", {}, spec, models(director, **kwargs), director.media.Media(), [11, 6, 1.0, "euler", "simple"])
+    def run_project(self, data, settings=None, media=None, **kwargs):
+        spec = director.project.load_project(json.dumps(data), {"width": 128, "height": 64, **(settings or {})})
+        job = render.Render("7", {}, spec, models(director, **kwargs), media or director.media.Media(), [11, 6, 1.0, "euler", "simple"])
         self.fake.calls.clear()
         video, saved = job.run("test/out")
         return job, Path(folder_paths.get_output_directory()) / saved["subfolder"] / saved["filename"]
@@ -120,9 +122,105 @@ class RenderTests(unittest.TestCase):
         self.assertFalse(torch.allclose(frames[:, :, :64], expected[:, :, :64], atol=0.02))
         self.assertAlmostEqual(self.probe(path)[1], 30 / 24, delta=0.05)
 
-    def test_refine_upscales_every_shot_and_carries_the_refined_tail(self):
+    def test_two_pass_refine_splits_one_schedule(self):
         shots = [{"id": "a", "frames": 30, "prompt": "一"}, {"id": "b", "frames": 30, "prompt": "二"}]
-        job, path = self.run_project({"shots": shots, "refine": {"enabled": True, "scale": 2.0, "steps": 4, "denoise": 0.5}})
+        job, path = self.run_project({"shots": shots}, {"refine": "two_pass", "width": 256, "height": 128, "refine_scale": 2.0, "refine_steps": 2})
+        base_a, base_b, refine_a, refine_b = self.fake.calls
+        # 6 steps: the draft runs the first 4 at half size and lands on 0, the last 2 run at the output size.
+        self.assertEqual((base_a["shape"][-2:], base_a["sigmas"]), ((4, 8), [1.0, 0.8333, 0.6667, 0.5, 0.0]))
+        self.assertEqual((refine_a["shape"][-2:], refine_a["sigmas"]), ((8, 16), [0.3333, 0.1667, 0.0]))
+        # Generated sound finishes in the full-size pass too; the continued shot keeps its carried head.
+        self.assertEqual(refine_a["audio_mask"].min().item(), 1.0)
+        self.assertEqual(refine_b["video_mask"][0, 0, :7].flatten().tolist(), [0.0] * 7)
+        self.assertEqual((refine_b["audio_mask"][..., 0].item(), refine_b["audio_mask"][..., -1].item()), (0.0, 1.0))
+        with av.open(str(path)) as container:
+            self.assertEqual((container.streams.video[0].width, container.streams.video[0].height), (256, 128))
+
+    def test_two_pass_source_edit_finishes_inside_its_masks_from_its_own_schedule(self):
+        write_video(self.root / "input" / "clip.mp4", 48, 256, 128, audio_seconds=2)
+        mask = png(self.root / "input" / "mask.png", 0, size=(256, 128), left_half=True)
+        source = {"media": {"filename": "clip.mp4", "subfolder": "", "type": "input"}, "start": 6}
+        shots = [{"id": "s", "kind": "source", "frames": 30, "prompt": "改左边", "source": source,
+                  "repaints": [{"mask": mask, "strength": 0.6, "grow": 0, "feather": 0}]}]
+        job, path = self.run_project({"shots": shots}, {"refine": "two_pass", "width": 256, "height": 128, "refine_scale": 2.0, "refine_steps": 2})
+        repaint, refine = self.fake.calls
+        self.assertEqual((repaint["shape"][-2:], repaint["start"]), ((4, 8), 0.6))
+        self.assertEqual((refine["shape"][-2:], refine["sigmas"]), ((8, 16), [0.2, 0.1, 0.0]))
+        self.assertEqual(refine["video_mask"][0, 0, 0, 0].tolist(), [1.0] * 8 + [0.0] * 8)
+        self.assertEqual(refine["audio_mask"].abs().sum().item(), 0.0)
+        frames = director.output.read_frames(job.keys[0]["frames"])
+        expected = job.source_frames(job.windows[0], 256, 128)[:30]
+        self.assertTrue(torch.allclose(frames[:, :, 128:], expected[:, :, 128:], atol=1 / 255))
+
+    def test_two_pass_lifts_in_latent_space_and_keeps_the_audio_path(self):
+        folder = self.root / "latent_upscale_models"
+        folder.mkdir()
+        tiny_upscaler(director, folder / "tiny.safetensors")
+        saved = folder_paths.folder_names_and_paths.get("latent_upscale_models")
+        folder_paths.folder_names_and_paths["latent_upscale_models"] = ([str(folder)], {".safetensors"})
+        shots = [{"id": "a", "frames": 30, "prompt": "一"}, {"id": "b", "frames": 30, "prompt": "二"}]
+        settings = {"refine": "two_pass", "width": 256, "height": 128, "refine_scale": 2.0, "refine_steps": 2,
+                    "refine_upscaler": "h3_latent", "refine_latent_model": "tiny.safetensors"}
+        try:
+            job, _ = self.run_project({"shots": shots}, settings)
+            base_a, base_b, refine_a, refine_b = self.fake.calls
+            # No VAE round trip: the learned upscaler takes the draft latent straight to the output grid.
+            self.assertEqual(job.m.vae.encoded, [])
+            self.assertEqual(refine_a["shape"][-2:], (8, 16))
+            # The draft reports its last step; the full-size pass restarts the audio on the noise it was on there
+            # (the stand-in tags it with that step's sigma, 0.5 in [1, .83, .67, .5, 0]).
+            self.assertTrue(base_a["last"] and torch.all(refine_a["audio_noise"] == 0.5))
+            # A cached draft keeps that noise for a later run that only changes the upscaler.
+            job, _ = self.run_project({"shots": shots}, {**settings, "refine_upscaler": "lanczos"})
+            refine_a, refine_b = self.fake.calls
+            self.assertTrue(torch.all(refine_a["audio_noise"] == 0.5))
+            self.assertEqual(job.m.vae.encoded[0][1:3], (128, 256))
+        finally:
+            folder_paths.folder_names_and_paths["latent_upscale_models"] = saved
+
+    def test_two_pass_references_keep_the_output_resolution(self):
+        hero = png(self.root / "input" / "hero.png", 200, size=(256, 128))
+        shots = [{"id": "a", "frames": 30, "prompt": "一", "refs": {"images": [hero]}}]
+        job, _ = self.run_project({"shots": shots}, {"refine": "two_pass", "width": 256, "height": 128, "refine_scale": 2.0,
+                                                     "refine_steps": 2, "refine_upscaler": "lanczos"})
+        base = self.fake.calls[0]
+        self.assertEqual((base["shape"][-2:], base["refs"]), ((4, 8), ["image"]))
+        # The reference is encoded at the 256x128 output size, not squeezed to the 128x64 draft.
+        self.assertEqual(job.m.vae.encoded[0], (1, 128, 256, 3))
+
+    def test_fit_modes_place_images_on_the_canvas(self):
+        image = torch.zeros(1, 64, 64, 3)
+        image[..., 0] = 1.0
+        crop, pad, stretch = (director.conditioning.place(image, 128, 64, mode) for mode in ("crop", "pad", "stretch"))
+        self.assertEqual([tuple(x.shape) for x in (crop, pad, stretch)], [(1, 64, 128, 3)] * 3)
+        # pad centres the square between black bars; crop and stretch fill the canvas.
+        self.assertEqual((float(pad[0, 32, 0, 0]), float(pad[0, 32, 64, 0])), (0.0, 1.0))
+        self.assertTrue(bool((crop[..., 0] > 0.99).all() and (stretch[..., 0] > 0.99).all()))
+
+    def test_reference_fit_and_strength_reach_the_conditioning(self):
+        hero = png(self.root / "input" / "hero.png", 200, size=(64, 64))
+        shot = {"id": "a", "frames": 30, "prompt": "一", "ref_strength": 0.5,
+                "refs": {"images": [{"media": hero, "fit": "crop"}, {"media": hero}]}}
+        job, _ = self.run_project({"shots": [shot]})
+        # crop takes the 128x64 canvas aspect at the image's pixel budget; auto keeps the square.
+        self.assertEqual(job.m.vae.encoded[:2], [(1, 32, 96, 3), (1, 64, 64, 3)])
+        self.assertAlmostEqual(self.fake.calls[0]["cond_strength"], 0.999 * 0.5, places=6)
+        self.run_project({"shots": [shot]})
+        self.assertEqual(self.fake.calls, [])
+        shot["refs"]["images"][0]["fit"] = "pad"
+        self.run_project({"shots": [shot]})
+        self.assertEqual(len(self.fake.calls), 1)
+
+    def test_two_pass_shot_without_refine_runs_its_whole_schedule_on_the_draft(self):
+        shots = [{"id": "a", "frames": 30, "prompt": "一", "refine": False}]
+        self.run_project({"shots": shots}, {"refine": "two_pass", "width": 256, "height": 128, "refine_scale": 2.0, "refine_steps": 2})
+        (base,) = self.fake.calls
+        self.assertEqual((base["shape"][-2:], base["steps"]), ((4, 8), 6))
+
+    def test_upscale_refine_resamples_every_shot_and_carries_the_refined_tail(self):
+        shots = [{"id": "a", "frames": 30, "prompt": "一"}, {"id": "b", "frames": 30, "prompt": "二"}]
+        job, path = self.run_project({"shots": shots}, {"refine": "upscale", "width": 256, "height": 128, "refine_scale": 2.0,
+                                                        "refine_steps": 4, "refine_denoise": 0.5})
         base, refine_a, refine_b = self.fake.calls[0], self.fake.calls[2], self.fake.calls[3]
         self.assertEqual(base["shape"][-2:], (4, 8))
         self.assertEqual((refine_a["shape"][-2:], refine_a["steps"], refine_a["start"]), ((8, 16), 4, 0.5))
@@ -134,13 +232,13 @@ class RenderTests(unittest.TestCase):
     def test_detail_region_is_resampled_and_stitched(self):
         shots = [{"id": "a", "frames": 30, "prompt": "人物", "details": [{"box": [0.25, 0.25, 0.5, 0.5], "denoise": 0.5,
                                                                       "megapixels": 0.1, "prompt": "脸部细节"}]}]
-        job, _ = self.run_project({"shots": shots, "detail": {"steps": 4}})
+        job, _ = self.run_project({"shots": shots}, {"detail_steps": 4})
         base, crop = self.fake.calls
         self.assertEqual(crop["prompt"], "脸部细节")
         self.assertEqual((crop["steps"], crop["start"]), (4, 0.5))
         self.assertEqual(crop["audio_mask"].abs().sum().item(), 0.0)
         self.assertTrue(director.cache.exists(job.keys[0]["details"][0], ".mkv"))
-        self.run_project({"shots": shots, "detail": {"steps": 4}})
+        self.run_project({"shots": shots}, {"detail_steps": 4})
         self.assertEqual(self.fake.calls, [])
 
     def test_soundtrack_locks_the_audio_and_is_kept_in_the_output(self):
@@ -153,6 +251,45 @@ class RenderTests(unittest.TestCase):
         with av.open(str(path)) as container:
             audio = np.concatenate([frame.to_ndarray() for frame in container.decode(audio=0)], axis=1)
         self.assertGreater(np.abs(audio[:, 48000:96000]).mean(), 0.05)
+
+    def test_connected_source_video_and_soundtrack(self):
+        write_video(self.root / "clip.mp4", 48, 128, 64)
+        media = director.media.Media(videos={"video_0": InputImpl.VideoFromFile(str(self.root / "clip.mp4"))},
+                                     audios={"audio_0": {"waveform": torch.full((1, 1, 32000 * 3), 0.2), "sample_rate": 32000}})
+        shots = [{"id": "s", "kind": "source", "frames": 30, "prompt": "", "audio": "soundtrack", "source": {"media": {"input": "video_0"}, "start": 6}}]
+        job, path = self.run_project({"shots": shots, "soundtrack": {"input": "audio_0"}}, media=media)
+        self.assertEqual(self.fake.calls, [])
+        frames = director.output.read_frames(job.keys[0]["frames"])
+        self.assertEqual([round(v * 47) for v in frames[:, 0, 0, 0].tolist()], list(range(6, 36)))
+        with av.open(str(path)) as container:
+            audio = np.concatenate([frame.to_ndarray() for frame in container.decode(audio=0)], axis=1)
+        self.assertAlmostEqual(float(np.abs(audio[:, 4800:43200]).mean()), 0.2, delta=0.02)
+
+    def test_reference_video_starts_at_its_in_point(self):
+        write_video(self.root / "input" / "ref.mp4", 96, 128, 64)
+        ref = {"media": {"filename": "ref.mp4", "subfolder": "", "type": "input"}, "start": 30, "audio": True}
+        spec = director.project.load_project(json.dumps({"shots": [{"id": "a", "frames": 30, "prompt": "", "refs": {"videos": [ref]}}]}),
+                                             {"width": 128, "height": 64})
+        window = director.project.plan_windows(spec)[0]
+        items, _ = director.conditioning.references(director.media.Media(), window, spec, None, FakeVAE(), FakeAudioVAE())
+        video = next(item for item in items if item["type"] == "video")
+        self.assertEqual([round(v * 95) for v in video["data"][:3, 0, 0, 0].tolist()], [30, 42, 54])
+
+    def test_node_reads_setting_widgets_and_video_sockets(self):
+        write_video(self.root / "clip.mp4", 48, 128, 64)
+        node = director.director.YogurtH3Director
+        project = json.dumps({"shots": [{"id": "s", "kind": "source", "frames": 30, "prompt": "", "source": {"media": {"input": "video_0"}, "start": 6}}]})
+        saved, node.hidden = node.hidden, SimpleNamespace(unique_id="9", prompt={})
+        try:
+            out = node.execute(model="model", clip=FakeClip(), vae=FakeVAE(), audio_vae=FakeAudioVAE(), seed=1, steps=4, cfg=1.0, sampler_name="euler",
+                               scheduler="simple", filename_prefix="test/node", project=project,
+                               videos={"video_0": InputImpl.VideoFromFile(str(self.root / "clip.mp4"))}, audios={"audio_0": None},
+                               width=96, height=64, overlap="22", ref_image_size="match", negative_prompt="", refine="off", refine_scale=2.0,
+                               refine_upscaler="lanczos", refine_steps=2, refine_denoise=0.35, detail=True, detail_steps=8)
+        finally:
+            node.hidden = saved
+        info = out.ui["yogurt_h3"][0]
+        self.assertEqual((info["size"], info["timeline"][0]["frames"]), ([96, 64], 30))
 
 
 if __name__ == "__main__":

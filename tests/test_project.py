@@ -10,8 +10,8 @@ project = director.project
 sampling = director.sampling
 
 
-def build(*shots, **extra):
-    return project.load_project(json.dumps({"width": 128, "height": 64, "shots": list(shots), **extra}))
+def build(*shots, settings=None, **extra):
+    return project.load_project(json.dumps({"shots": list(shots), **extra}), {"width": 128, "height": 64, **(settings or {})})
 
 
 class WindowTests(unittest.TestCase):
@@ -54,20 +54,32 @@ class WindowTests(unittest.TestCase):
                      {"frames": 40},
                      refs={"images": [image("hero.png"), image("cafe.png")], "audios": [image("voice.wav")]})
         a, b, c = data["shots"]
-        self.assertEqual([m["filename"] for m in a["refs"]["images"]], ["hero.png", "cafe.png", "own.png"])
+        self.assertEqual([m["media"]["filename"] for m in a["refs"]["images"]], ["hero.png", "cafe.png", "own.png"])
         self.assertEqual(a["global_refs"], {"images": 2, "videos": 0, "audios": 1})
-        self.assertEqual([m["filename"] for m in b["refs"]["images"]], ["solo.png"])
+        self.assertEqual([m["media"]["filename"] for m in b["refs"]["images"]], ["solo.png"])
         self.assertEqual(b["global_refs"], {"images": 0, "videos": 0, "audios": 0})
         self.assertEqual(len(c["refs"]["audios"]), 1)
         self.assertTrue(a["inherit_prompt"])
+
+    def test_fit_and_reference_strength_are_parsed(self):
+        data = build({"frames": 40, "ref_strength": 0.05, "keyframes": [{"at": 0, "media": {"filename": "a.png"}, "fit": "pad"}],
+                      "refs": {"images": [{"media": {"filename": "b.png"}, "fit": "crop"}, {"media": {"filename": "c.png"}, "fit": "zoom"}]}})
+        shot = data["shots"][0]
+        self.assertEqual([m["fit"] for m in shot["refs"]["images"]], ["crop", "auto"])
+        self.assertEqual((shot["keyframes"][0]["fit"], shot["ref_strength"]), ("pad", 0.1))
 
     def test_references_beyond_the_ui_limit_are_kept(self):
         shot = build({"frames": 40, "refs": {"images": [{"filename": f"{i}.png"} for i in range(11)]}})["shots"][0]
         self.assertEqual(len(shot["refs"]["images"]), 11)
 
+    def test_detail_switch_drops_every_region(self):
+        shot = {"frames": 30, "details": [{"box": [0.1, 0.1, 0.3, 0.3]}]}
+        self.assertEqual(len(build(shot)["shots"][0]["details"]), 1)
+        self.assertEqual(build(shot, settings={"detail": False})["shots"][0]["details"], [])
+
     def test_overlap_snaps_down_to_the_latent_grid(self):
-        self.assertEqual(build({"frames": 10}, overlap=30)["overlap"], 22)
-        self.assertEqual(build({"frames": 10}, overlap=4)["overlap"], 0)
+        self.assertEqual(build({"frames": 10}, settings={"overlap": "30"})["overlap"], 22)
+        self.assertEqual(build({"frames": 10}, settings={"overlap": "4"})["overlap"], 0)
 
     def test_validation_messages(self):
         with self.assertRaisesRegex(ValueError, "还没有镜头"):

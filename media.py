@@ -1,5 +1,6 @@
 """Director media: editor uploads and graph inputs, adapted to the 24 fps H3 timeline."""
 
+import hashlib
 import os
 
 import av
@@ -11,10 +12,11 @@ import comfy.audio
 import comfy.model_management
 import folder_paths
 import node_helpers
+from comfy_api.latest import Input
 from comfy_extras.nodes_audio import load as load_audio_file
 from comfy_extras.nodes_minimax_h3 import _resize
 
-from .cache import tensor_digest
+from .cache import digest, tensor_digest
 from .project import FPS
 
 
@@ -42,17 +44,27 @@ def fit(frames, width, height, crop="center"):
 class Media:
     """Execution-scoped access to the project's media; decoded audio is kept only for this run."""
 
-    def __init__(self, images=None, masks=None):
-        self.inputs = {**(images or {}), **(masks or {})}
-        self.inputs = {k: v for k, v in self.inputs.items() if v is not None}
+    def __init__(self, images=None, masks=None, videos=None, audios=None):
+        self.inputs = {k: v for group in (images, masks, videos, audios) for k, v in (group or {}).items() if v is not None}
         self._identity = {}
         self._audio = {}
+        self._streams = {}
 
     def graph(self, item):
         value = self.inputs.get(item["input"])
         if value is None:
-            raise ValueError(f"导演台引用了图输入 {item['input']}，但该输入没有连接。")
+            raise ValueError(f"导演台引用了输入 {item['input']}，但该输入没有连接。")
         return value
+
+    def _stream(self, item):
+        """A VIDEO input as av opens it: its file path, or its in-memory container rewound for every read."""
+        key = item["input"]
+        if key not in self._streams:
+            self._streams[key] = self.graph(item).get_stream_source()
+        source = self._streams[key]
+        if not isinstance(source, str):
+            source.seek(0)
+        return source
 
     def identity(self, item):
         if item is None:
@@ -60,10 +72,32 @@ class Media:
         if "input" in item:
             key = item["input"]
             if key not in self._identity:
-                self._identity[key] = tensor_digest(self.graph(item))
+                value = self.graph(item)
+                if isinstance(value, Input.Video):
+                    source = self._stream(item)
+                    if isinstance(source, str):
+                        stat = os.stat(source)
+                        content = [source, stat.st_size, stat.st_mtime_ns]
+                    else:
+                        content = hashlib.sha256(source.getbuffer()).hexdigest()
+                    self._identity[key] = digest([content, value.get_active_trim_window()])
+                elif isinstance(value, dict):
+                    self._identity[key] = digest([tensor_digest(value["waveform"]), value["sample_rate"]])
+                else:
+                    self._identity[key] = tensor_digest(value)
             return ["input", self._identity[key]]
         stat = os.stat(resolve_path(item))
         return [item["type"], item["subfolder"], item["filename"], stat.st_size, stat.st_mtime_ns]
+
+    def video_size(self, item):
+        value = self.graph(item) if "input" in item else None
+        if isinstance(value, Input.Video):
+            return value.get_dimensions()
+        if value is not None:
+            return value.shape[2], value.shape[1]
+        with av.open(resolve_path(item)) as container:
+            stream = container.streams.video[0]
+            return stream.codec_context.width, stream.codec_context.height
 
     def image(self, item):
         if "input" in item:
@@ -86,32 +120,40 @@ class Media:
 
     def video(self, item, start, count, width, height, crop="center"):
         """``count`` frames from 24 fps frame ``start``; each source frame is held until the next one starts."""
-        if "input" in item:
-            frames = self.graph(item)[start:start + count]
+        value = self.graph(item) if "input" in item else None
+        if isinstance(value, Input.Video):
+            frames = self._decode_video(self._stream(item), start, count, width, height, crop, value.get_active_trim_window(), item["input"])
+        elif value is not None:
+            frames = value[start:start + count]
             if frames.shape[0] == 0:
                 raise ValueError(f"图输入 {item['input']} 在第 {start} 帧之后没有画面。")
             frames = fit(frames.float(), width, height, crop)
         else:
-            frames = self._decode_video(resolve_path(item), start, count, width, height, crop)
+            path = resolve_path(item)
+            frames = self._decode_video(path, start, count, width, height, crop, (0.0, 0.0), os.path.basename(path))
         if frames.shape[0] < count:
             frames = torch.cat([frames, frames[-1:].expand(count - frames.shape[0], -1, -1, -1)])
         return frames
 
-    def _decode_video(self, path, start, count, width, height, crop):
+    def _decode_video(self, source, start, count, width, height, crop, trim, name):
+        """``trim`` is the input's (start, duration) window in seconds; duration 0 runs to the end."""
         def convert(frame):
             pixels = torch.from_numpy(frame.to_ndarray(format="rgb24")).float().div_(255)[None]
             return fit(pixels, width, height, crop)
 
+        offset, duration = trim
         frames, slot, current, converted = [], start, None, None
-        with av.open(path) as container:
+        with av.open(source) as container:
             stream = container.streams.video[0]
             stream.thread_type = "AUTO"
-            origin = float((stream.start_time or 0) * stream.time_base)
-            if start > 0:
+            origin = float((stream.start_time or 0) * stream.time_base) + offset
+            if start > 0 or offset > 0:
                 container.seek(int((origin + start / FPS) / stream.time_base), stream=stream, backward=True)
             for decoded in container.decode(stream):
                 comfy.model_management.throw_exception_if_processing_interrupted()
                 seconds = float(decoded.pts * decoded.time_base) - origin
+                if duration and seconds >= duration - 1e-4:
+                    break
                 while current is not None and slot / FPS < seconds - 1e-4 and len(frames) < count:
                     converted = convert(current) if converted is None else converted
                     frames.append(converted)
@@ -120,19 +162,17 @@ class Media:
                     break
                 current, converted = decoded, None
         if current is None:
-            raise ValueError(f"源视频在第 {start} 帧（{start / FPS:.2f} 秒）之后没有画面：{os.path.basename(path)}")
+            raise ValueError(f"源视频在第 {start} 帧（{start / FPS:.2f} 秒）之后没有画面：{name}")
         if len(frames) < count:
             frames.append(convert(current) if converted is None else converted)
         return torch.cat(frames)
 
     def audio(self, item, start, count):
-        """Audio of 24 fps frames [start, start + count) on the file's video timeline, zero-padded."""
-        path = resolve_path(item) if "input" not in item else None
-        if path is None:
-            raise ValueError("音频只能来自上传的音频或视频文件。")
-        if path not in self._audio:
-            self._audio[path] = self._decode_audio(path)
-        wave, rate = self._audio[path]
+        """Audio of 24 fps frames [start, start + count) on the media's video timeline, zero-padded."""
+        key = item["input"] if "input" in item else resolve_path(item)
+        if key not in self._audio:
+            self._audio[key] = self._load_audio(item)
+        wave, rate = self._audio[key]
         a, b = round(start * rate / FPS), round((start + count) * rate / FPS)
         clip = torch.zeros((wave.shape[0], b - a), dtype=wave.dtype)
         lo, hi = max(a, 0), min(b, wave.shape[-1])
@@ -140,15 +180,31 @@ class Media:
             clip[:, lo - a:hi - a] = wave[:, lo:hi]
         return {"waveform": clip[None], "sample_rate": rate}
 
+    def _load_audio(self, item):
+        """(waveform [C, S], sample rate) of an uploaded file, an AUDIO input or a VIDEO input's soundtrack."""
+        if "input" not in item:
+            return self._decode_audio(resolve_path(item))
+        value = self.graph(item)
+        if isinstance(value, Input.Video):
+            wave, rate = self._decode_audio(self._stream(item))
+            offset, duration = value.get_active_trim_window()
+            wave = wave[:, round(offset * rate):]
+            return (wave[:, :round(duration * rate)] if duration else wave), rate
+        if isinstance(value, dict):
+            return value["waveform"][0], int(value["sample_rate"])
+        raise ValueError(f"图输入 {item['input']} 没有声音；音频请接 LoadAudio 或视频。")
+
     @staticmethod
-    def _decode_audio(path):
-        with av.open(path) as container:
+    def _decode_audio(source):
+        with av.open(source) as container:
             if not container.streams.audio:
                 return torch.zeros((2, 0)), 32000
             audio = container.streams.audio[0]
             origin = float((container.streams.video[0].start_time or 0) * container.streams.video[0].time_base) if container.streams.video else 0.0
             offset = float((audio.start_time or 0) * audio.time_base) - origin
-        wave, rate = load_audio_file(path)
+        if not isinstance(source, str):
+            source.seek(0)
+        wave, rate = load_audio_file(source)
         shift = round(offset * rate)
         if shift > 0:
             wave = torch.nn.functional.pad(wave, (shift, 0))

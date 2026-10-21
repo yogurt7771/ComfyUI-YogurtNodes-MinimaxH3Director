@@ -3,7 +3,6 @@ import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
 
 export const FPS = 24;
-export const OVERLAPS = [0, 5, 22, 39, 56];
 export const NODE = "YogurtH3Director";
 export const STAGES = {
     encoding: "编码条件", sampling: "生成中", repainting: "重绘中", upscaling: "放大中", refining: "二采中",
@@ -22,26 +21,28 @@ export function newShot(kind = "generate") {
         refs: { images: [], videos: [], audios: [] },
         source: kind === "source" ? { media: null, start: 0, regen: false, strength: 1 } : null,
         audio: kind === "source" ? "source" : "generate", repaints: [], details: [], refine: true, rewrite: true,
-        inherit_refs: true, inherit_prompt: true,
+        inherit_refs: true, inherit_prompt: true, ref_strength: 1,
     };
 }
 
 export function newProject() {
     return {
-        version: 1, width: 832, height: 480, overlap: 22, negative_prompt: "", ref_image_size: "match", soundtrack: null,
-        refs: { images: [], videos: [], audios: [] }, story: "", rewrite: { enabled: false, notes: "", seed: 0 },
-        refine: { enabled: false, scale: 1.5, upscaler: "lanczos", steps: 8, denoise: 0.35 }, detail: { steps: 8 },
+        version: 1, soundtrack: null, refs: { images: [], videos: [], audios: [] }, story: "", rewrite: { enabled: false, notes: "", seed: 0 },
         shots: [newShot()],
     };
 }
 
+// Reference images carry how they meet the canvas (older projects stored bare media), videos the frame they start at.
+const refsOf = refs => ({ audios: [], ...refs, images: (refs?.images || []).map(m => (m.media ? { fit: "auto", ...m } : { media: m, fit: "auto" })),
+    videos: (refs?.videos || []).map(v => ({ audio: false, start: 0, ...v })) });
+
 export function normalize(project) {
     const base = newProject();
-    const out = { ...base, ...project, refine: { ...base.refine, ...(project?.refine || {}) }, detail: { ...base.detail, ...(project?.detail || {}) },
-        rewrite: { ...base.rewrite, ...(project?.rewrite || {}) }, refs: { ...base.refs, ...(project?.refs || {}) } };
+    const out = { ...base, ...project, rewrite: { ...base.rewrite, ...(project?.rewrite || {}) }, refs: refsOf(project?.refs) };
     out.shots = (project?.shots || []).map(shot => {
         const fresh = newShot(shot.kind === "source" ? "source" : "generate");
-        return { ...fresh, ...shot, refs: { ...fresh.refs, ...(shot.refs || {}) }, source: shot.kind === "source" ? { ...fresh.source, ...(shot.source || {}) } : null };
+        return { ...fresh, ...shot, refs: refsOf(shot.refs), keyframes: (shot.keyframes || []).map(k => ({ fit: "auto", ...k })),
+            source: shot.kind === "source" ? { ...fresh.source, ...(shot.source || {}) } : null };
     });
     if (!out.shots.length) out.shots = [newShot()];
     return out;
@@ -69,17 +70,22 @@ export function planWindows(project) {
 
 export const totalFrames = project => planWindows(project).reduce((sum, w) => sum + w.keep, 0);
 
-export function canvasFor(aspect, megapixels) {
-    const area = megapixels * 1e6;
-    const w = Math.round(Math.sqrt(area * aspect) / 32) * 32, h = Math.round(Math.sqrt(area / aspect) / 32) * 32;
-    return [Math.max(64, w), Math.max(64, h)];
-}
-
 export const widget = (node, name) => node.widgets?.find(w => w.name === name);
 
+// Canvas, overlap, refine and the detail switch are node widgets; the editor reads them next to the shots but never stores them.
+const WIDGET_KEYS = ["width", "height", "overlap", "refine", "detail"];
+
 export function readProject(node) {
-    try { return normalize(JSON.parse(widget(node, "project")?.value || "{}")); } catch { return newProject(); }
+    let project;
+    try { project = normalize(JSON.parse(widget(node, "project")?.value || "{}")); } catch { project = newProject(); }
+    const value = name => widget(node, name)?.value;
+    return { ...project, width: value("width"), height: value("height"), overlap: Number(value("overlap")),
+        refine: { enabled: ["two_pass", "upscale"].includes(value("refine")), mode: value("refine"), scale: value("refine_scale") },
+        detail: { enabled: value("detail") } };
 }
+
+/** The project as stored in the node's project widget and in exported files. */
+export const projectData = project => Object.fromEntries(Object.entries(project).filter(([key]) => !WIDGET_KEYS.includes(key)));
 
 let pending = null;
 /** Let the workflow tracker see edits made in the panel or modal (persistence and undo). */
@@ -91,18 +97,22 @@ export function changed() {
 export function writeProject(node, project) {
     const w = widget(node, "project");
     if (!w) return;
-    w.value = JSON.stringify(project);
+    w.value = JSON.stringify(projectData(project));
     w.callback?.(w.value);
     node.setDirtyCanvas?.(true, true);
     changed();
 }
 
-/** Connected Autogrow sockets the project can reference, e.g. {input: "image_0"}. */
-export function graphInputs(node, kind) {
-    const pattern = kind === "mask" ? /(^|\.)mask_(\d+)$/ : /(^|\.)image_(\d+)$/;
-    return (node.inputs || []).filter(i => i.link != null && pattern.test(i.name)).map(i => {
-        const n = Number(i.name.match(pattern)[2]);
-        return { input: `${kind === "mask" ? "mask" : "image"}_${n}`, label: `${kind === "mask" ? "遮罩输入" : "图输入"} ${n + 1}` };
+const INPUT_LABELS = { image: "图输入", mask: "遮罩输入", video: "视频输入", audio: "音频输入" };
+
+/** Connected Autogrow sockets of the given kinds the project can reference, e.g. {input: "video_0"}. */
+export function graphInputs(node, ...kinds) {
+    return kinds.flatMap(kind => {
+        const pattern = new RegExp(`(^|\\.)${kind}_(\\d+)$`);
+        return (node.inputs || []).filter(i => i.link != null && pattern.test(i.name)).map(i => {
+            const input = `${kind}_${i.name.match(pattern)[2]}`;
+            return { input, label: mediaLabel({ input }) };
+        });
     });
 }
 
@@ -126,7 +136,8 @@ export async function previewRewrite(node, project) {
     const rewriter = rewriterConfig(node);
     if (!rewriter) throw new Error("先把“Yogurt H3 改写模型”节点连接到导演台的 rewriter。");
     const response = await api.fetchApi("/yogurt_h3/director/rewrite", {
-        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ project: JSON.stringify(project), rewriter }),
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ project: JSON.stringify(projectData(project)), settings: { width: project.width, height: project.height, overlap: project.overlap }, rewriter }),
     });
     const data = await response.json();
     if (!response.ok) throw new Error(data.error || `改写失败：${response.status}`);
@@ -143,7 +154,10 @@ export function storePrompts(node, prompts, report) {
 
 export function mediaLabel(m) {
     if (!m) return "未选择";
-    if (m.input) return `${m.input.startsWith("mask") ? "遮罩输入" : "图输入"} ${Number(m.input.split("_")[1]) + 1}`;
+    if (m.input) {
+        const [kind, n] = m.input.split("_");
+        return `${INPUT_LABELS[kind]} ${Number(n) + 1}`;
+    }
     return m.filename;
 }
 
@@ -269,6 +283,12 @@ const css = `
 .yh3-modal .screen canvas { position:absolute; inset:0; width:100%; height:100%; touch-action:none; }
 .yh3-modal .placeholder { position:absolute; inset:0; display:flex; align-items:center; justify-content:center; text-align:center; color:var(--yh3-dim); padding:20px; background:#101318; }
 .yh3-modal .transport { display:flex; gap:8px; align-items:center; }
+.yh3-modal .trimbar { display:flex; flex-direction:column; gap:5px; padding:6px 8px; border-radius:8px; background:var(--yh3-panel); }
+.yh3-modal .trimbar[hidden] { display:none; }
+.yh3-modal .trimbar .lane { position:relative; height:24px; border-radius:5px; background:repeating-linear-gradient(90deg,#1b2027 0 1px,#0f1216 1px 40px); cursor:pointer; overflow:hidden; }
+.yh3-modal .trimbar .window { position:absolute; top:0; bottom:0; min-width:4px; box-sizing:border-box; border:2px solid var(--yh3-src); border-radius:4px; background:#e0a14a40; cursor:grab; }
+.yh3-modal .trimbar .window .out { position:absolute; right:-2px; top:-2px; bottom:-2px; width:7px; background:var(--yh3-src); cursor:ew-resize; }
+.yh3-modal .trimbar .head { position:absolute; top:0; bottom:0; width:2px; margin-left:-1px; background:#ff5a5a; pointer-events:none; }
 .yh3-modal .transport input[type=range] { flex:1; }
 .yh3-modal .toolbar { display:flex; gap:6px; align-items:center; flex-wrap:wrap; min-height:32px; padding:4px 8px; border-radius:8px; background:var(--yh3-panel); }
 .yh3-modal .toolbar.painting { background:#3a2b14; border:1px solid var(--yh3-src); }

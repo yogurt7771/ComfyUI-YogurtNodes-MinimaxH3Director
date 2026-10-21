@@ -18,12 +18,12 @@ from comfy_api.latest import io
 
 from . import cache
 from .cache import digest
-from .conditioning import video_size
 from .project import FPS, plan_windows
 
 VERSION = "rewrite-2"
 SKILL = Path(__file__).resolve().parent / "h3-prompt-writing"
 PROVIDERS = ("openai", "anthropic", "ollama")
+REMINDERS = 2
 Rewriter = io.Custom("YOGURT_H3_REWRITER")
 
 SYSTEM_PROMPT = """You are the screenwriter of a film made of several segments generated one by one with MiniMax H3. \
@@ -53,7 +53,9 @@ in the language the user wrote it in, using the guide's dialogue markup.
 Work in two steps. First write /plan.md: one beat per requested segment in timeline order, with the \
 characters, wardrobe, setting and sound that carry across segments. Then write the requested segments one at \
 a time in timeline order: finish one segment's prompt, submit it with `submit_prompt`, and only then start the \
-next, continuing from the prompts already written."""
+next, continuing from the prompts already written. Prompts are saved only through `submit_prompt`, never from \
+your text replies. Keep calling tools until `submit_prompt` reports that every segment is saved: a reply without \
+a tool call ends your session."""
 
 
 def rewriter_config(provider, model, base_url="", api_key="", temperature=0.7, max_tokens=8192, vision=True):
@@ -130,7 +132,7 @@ def labels(window):
         def scope(kind, i):
             return f"global reference {kind}, the same in every segment" if i < shared[kind + "s"] else f"reference {kind}"
 
-        out = [(f"<Picture {i + 1}>", scope("image", i), m) for i, m in enumerate(refs["images"])]
+        out = [(f"<Picture {i + 1}>", scope("image", i), m["media"]) for i, m in enumerate(refs["images"])]
         videos = ([("the source video this segment rewrites; keep its motion, framing and timing", shot["source"]["media"], False)]
                   if shot["source"] and shot["source"]["regen"] else [])
         videos += [(scope("video", i), v["media"], v["audio"]) for i, v in enumerate(refs["videos"])]
@@ -195,7 +197,7 @@ def _image_block(image, caption):
 
 
 def _video_frame(media, item, start):
-    width, height = video_size(media, item)
+    width, height = media.video_size(item)
     scale = 512 / max(width, height)
     return media.video(item, start, 1, max(2, round(width * scale)), max(2, round(height * scale)), "disabled")
 
@@ -209,12 +211,12 @@ def global_attachments(project, targets, media):
     if not any(w.shot["inherit_refs"] for w in targets):
         return []
     refs, blocks = project["refs"], []
-    for i, item in enumerate(refs["images"]):
+    for i, item in enumerate(m["media"] for m in refs["images"]):
         if _visible(media, item):
             blocks += _image_block(media.image(item), f"Global reference image {i + 1} (<Picture {i + 1}> in every segment that uses global references):")
     for i, video in enumerate(refs["videos"]):
         if _visible(media, video["media"]):
-            blocks += _image_block(_video_frame(media, video["media"], 0),
+            blocks += _image_block(_video_frame(media, video["media"], video["start"]),
                                    f"Global reference video {i + 1}, first frame (its <Video N> label is listed in each segment):")
     return blocks
 
@@ -224,13 +226,15 @@ def attachments(window, media):
     shot = window.shot
     blocks = []
     mode, items = labels(window)
+    starts = {id(v["media"]): v["start"] for v in shot["refs"]["videos"]}
+    if shot["source"]:
+        starts[id(shot["source"]["media"])] = shot["source"]["start"]
     for label, text, item in items:
         if not _visible(media, item) or text.startswith("global reference"):
             continue
         caption = f"Segment {window.index + 1} {label} ({text}):"
         if label.startswith("<Video"):
-            source = shot["source"]
-            image = _video_frame(media, item, source["start"] if source and item is source["media"] else 0)
+            image = _video_frame(media, item, starts[id(item)])
         else:
             image = media.image(item)
         blocks += _image_block(image, caption)
@@ -250,7 +254,7 @@ def _identity(media, item):
 
 def _segment_key(window, project, config, skill, media, previous):
     shot = window.shot
-    items = [k["media"] for k in shot["keyframes"]] + shot["refs"]["images"] + shot["refs"]["audios"] + [v["media"] for v in shot["refs"]["videos"]]
+    items = [k["media"] for k in shot["keyframes"]] + [m["media"] for m in shot["refs"]["images"]] + shot["refs"]["audios"] + [v["media"] for v in shot["refs"]["videos"]]
     if shot["source"]:
         items.append(shot["source"]["media"])
     model = {k: v for k, v in config.items() if k != "api_key"}
@@ -366,16 +370,29 @@ def _write(project, windows, targets, prompts, config, media, skill, event=None)
         from deepagents.backends.utils import create_file_data
     except ImportError as error:
         raise RuntimeError("提示词改写需要 deepagents：在 ComfyUI 的 Python 环境中 pip install deepagents。") from error
+    from langchain_core.messages import AIMessage, HumanMessage
+
     written = {}
     if event:
         event(targets[0].index, "rewriting")
     agent = create_deep_agent(model=chat_model(config), tools=[submit_tool(targets, written, event)], system_prompt=SYSTEM_PROMPT,
                               skills=["/skills/"], name="yogurt-h3-screenwriter")
-    inputs = {"messages": [_message(project, windows, targets, prompts, config, media)],
-              "files": {path: create_file_data(text) for path, text in skill.items()}}
-    for _ in agent.stream(inputs, config={"recursion_limit": 100 + 10 * len(targets)}, stream_mode="values"):
-        comfy.model_management.throw_exception_if_processing_interrupted()
-    missing = [w.index + 1 for w in targets if not written.get(w.shot["id"])]
-    if missing:
-        raise RuntimeError(f"改写模型没有交回第 {'、'.join(map(str, missing))} 镜的提示词。")
-    return {w.shot["id"]: written[w.shot["id"]] for w in targets}
+    messages = [_message(project, windows, targets, prompts, config, media)]
+    files = {path: create_file_data(text) for path, text in skill.items()}
+    for attempt in range(REMINDERS + 1):
+        for state in agent.stream({"messages": messages, "files": files}, config={"recursion_limit": 100 + 10 * len(targets)}, stream_mode="values"):
+            comfy.model_management.throw_exception_if_processing_interrupted()
+        missing = [w for w in targets if not written.get(w.shot["id"])]
+        if not missing:
+            return {w.shot["id"]: written[w.shot["id"]] for w in targets}
+        if attempt < REMINDERS:
+            # Any reply without a tool call ends the run; models often stop after the plan or paste a prompt as text.
+            ids = ", ".join(f"`{w.shot['id']}`" for w in missing)
+            messages = state["messages"] + [HumanMessage(
+                content=f"Not submitted yet: segments {ids}. Prompts are saved only through `submit_prompt`; a text reply is not saved "
+                        f"and ends the session. Call `submit_prompt` now for segment {missing[0].index + 1} (id `{missing[0].shot['id']}`), "
+                        f"then the rest in order.")]
+            files = state["files"]
+    reply = next((" ".join(m.text.split()) for m in reversed(state["messages"]) if isinstance(m, AIMessage) and m.text.strip()), "")
+    raise RuntimeError(f"改写模型没有交回第 {'、'.join(str(w.index + 1) for w in missing)} 镜的提示词（已提醒 {REMINDERS} 次）。"
+                       + (f"模型最后的回复：{reply[:300]}" if reply else "模型没有文字回复，请确认它支持工具调用。"))

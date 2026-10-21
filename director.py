@@ -5,9 +5,10 @@ import json
 import comfy.samplers
 from comfy_api.latest import io
 
+from . import latent_upscale
 from .cache import digest
 from .media import Media
-from .project import DEFAULT_PROJECT, load_project, plan_windows
+from .project import DEFAULT_PROJECT, OVERLAPS, REFINE_MODES, REFINE_UPSCALERS, SETTINGS, load_project, plan_windows
 from .render import Models, Render, send_event
 from .rewrite import Rewriter, rewrite_project
 
@@ -16,7 +17,7 @@ def _files(project):
     shot_media = []
     for shot in project["shots"]:
         refs = shot["refs"]
-        shot_media += [k["media"] for k in shot["keyframes"]] + refs["images"] + refs["audios"]
+        shot_media += [k["media"] for k in shot["keyframes"]] + [m["media"] for m in refs["images"]] + refs["audios"]
         shot_media += [v["media"] for v in refs["videos"]] + [layer["mask"] for layer in shot["repaints"]]
         if shot["source"]:
             shot_media.append(shot["source"]["media"])
@@ -45,6 +46,34 @@ class YogurtH3Director(io.ComfyNode):
                 io.String.Input("filename_prefix", default="yogurt_h3/director"),
                 io.String.Input("project", multiline=True, default=json.dumps(DEFAULT_PROJECT, ensure_ascii=False),
                                 tooltip="导演台工程，由节点里的时间线编辑器写入。"),
+                io.Int.Input("width", default=SETTINGS["width"], min=64, max=4096, step=32, tooltip="首采画面宽度（32 的倍数）。"),
+                io.Int.Input("height", default=SETTINGS["height"], min=64, max=4096, step=32, tooltip="首采画面高度（32 的倍数）。"),
+                io.Combo.Input("overlap", options=[str(v) for v in OVERLAPS], default=str(SETTINGS["overlap"]),
+                               tooltip="续接重叠帧：勾选“接着上一镜”的镜头从上一镜最后这么多帧接着生成（22 帧约 0.92 秒）；0 关闭续接。"),
+                io.Combo.Input("ref_image_size", options=["match", "max"], default=SETTINGS["ref_image_size"],
+                               tooltip="参考图尺寸：match 等比缩到成片的像素量（只缩小不放大）；max 短边最大 2048（更清晰，参考 token 更多，更慢）。"),
+                io.String.Input("negative_prompt", default=SETTINGS["negative_prompt"], tooltip="负面提示词，cfg ≠ 1 时生效。"),
+                io.Combo.Input("refine", options=list(REFINE_MODES), default=SETTINGS["refine"],
+                               tooltip="二采。开启后 width × height 是成片尺寸，首采在它除以 refine_scale 的小画幅上进行。\n"
+                                       "two_pass：首采只跑调度表的前面几步，放大后在成片尺寸跑最后 refine_steps 步（总步数仍是 steps，快）。\n"
+                                       "upscale：首采跑完整个调度表，放大后从 refine_denoise 的噪声再采 refine_steps 步。"),
+                io.Float.Input("refine_scale", default=SETTINGS["refine_scale"], min=1.0, max=4.0, step=0.125,
+                               tooltip="成片相对首采的放大倍数：首采画幅 = width × height ÷ refine_scale。"),
+                io.Combo.Input("refine_upscaler", options=list(REFINE_UPSCALERS), default=SETTINGS["refine_upscaler"],
+                               tooltip="首采放大到成片尺寸的方式。\n"
+                                       "h3_latent：H3 latent 放大模型直接放大视频 latent，不经过 VAE（快；源视频局部重绘镜头仍走像素）。\n"
+                                       "lanczos：VAE 解码 → Lanczos 放大 → VAE 编码。\n"
+                                       "model：VAE 解码 → 接入的 upscale_model 放大 → VAE 编码。"),
+                io.Combo.Input("refine_latent_model", options=latent_upscale.choices(), default=SETTINGS["refine_latent_model"],
+                               tooltip="h3_latent 用的放大权重（models/latent_upscale_models）。默认权重缺失时，首次使用会从 Hugging Face "
+                                       "下载约 690 MB（LBH-123-AI/Minimax_h3_latent_Upscaler，校验 SHA-256；可用 HF_ENDPOINT 换镜像）。"),
+                io.Int.Input("refine_steps", default=SETTINGS["refine_steps"], min=1, max=200,
+                             tooltip="two_pass：调度表最后几步在成片尺寸上跑（例如 steps 8、这里 2 = 首采 6 步 + 二采 2 步）。upscale：二采的步数。"),
+                io.Float.Input("refine_denoise", default=SETTINGS["refine_denoise"], min=0.05, max=1.0, step=0.05,
+                               tooltip="只用于 upscale：二采从多大的噪声开始（1 = 纯噪声），常用 0.25–0.4。two_pass 从首采停下的位置接着采。"),
+                io.Boolean.Input("detail", default=SETTINGS["detail"],
+                                 tooltip="局部精修总开关：关掉时跳过所有精修区域。区域在导演台“局部精修”页框选。"),
+                io.Int.Input("detail_steps", default=SETTINGS["detail_steps"], min=1, max=200, tooltip="局部精修步数。"),
                 io.Model.Input("ref_model", optional=True,
                                tooltip="MiniMax H3 ref2va 模型：带参考素材或改写源视频的镜头使用它；不接则用 model。"),
                 io.Model.Input("refine_model", optional=True, tooltip="二采与局部精修使用的模型；不接则沿用镜头的模型。"),
@@ -60,6 +89,12 @@ class YogurtH3Director(io.ComfyNode):
                 io.Autogrow.Input("masks", optional=True, template=io.Autogrow.TemplatePrefix(
                     input=io.Mask.Input("mask", tooltip="编辑器里可选作局部重绘遮罩；多帧遮罩逐帧对应。"),
                     prefix="mask_", min=0, max=16)),
+                io.Autogrow.Input("videos", optional=True, template=io.Autogrow.TemplatePrefix(
+                    input=io.Video.Input("video", tooltip="编辑器里可选作源视频、参考视频，或取其原声作参考音频 / 配乐。"),
+                    prefix="video_", min=0, max=16)),
+                io.Autogrow.Input("audios", optional=True, template=io.Autogrow.TemplatePrefix(
+                    input=io.Audio.Input("audio", tooltip="编辑器里可选作参考音频或配乐音轨。"),
+                    prefix="audio_", min=0, max=16)),
             ],
             outputs=[io.Video.Output("video")],
             hidden=[io.Hidden.unique_id, io.Hidden.prompt],
@@ -79,9 +114,9 @@ class YogurtH3Director(io.ComfyNode):
     @classmethod
     def execute(cls, model, clip, vae, audio_vae, seed, steps, cfg, sampler_name, scheduler, filename_prefix, project,
                 ref_model=None, refine_model=None, rewriter=None, inpaint_patch=None, upscale_model=None, sampler=None,
-                sigmas=None, images=None, masks=None) -> io.NodeOutput:
-        spec = load_project(project)
-        media = Media(images, masks)
+                sigmas=None, images=None, masks=None, videos=None, audios=None, **settings) -> io.NodeOutput:
+        spec = load_project(project, settings)
+        media = Media(images, masks, videos, audios)
         prompts, report = {}, []
         if spec["rewrite"]["enabled"]:
             if rewriter is None:

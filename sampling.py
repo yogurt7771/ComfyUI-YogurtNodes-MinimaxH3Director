@@ -34,14 +34,41 @@ def schedule(model, steps, scheduler, denoise=1.0, custom=None):
         total = max(total + 1, total * 9 // 8)
 
 
-def sample(model, positive, negative, cfg, sampler, sigmas, latent, seed):
+def split(sigmas, steps):
+    """One schedule for two-pass 二采: (draft, tail). The draft runs all but the last ``steps`` steps and lands on 0,
+    the clean estimate that gets upscaled; the tail re-noises it to where the draft stopped and runs those last steps."""
+    k = max(1, sigmas.shape[-1] - 1 - steps)
+    return torch.cat([sigmas[:k], sigmas.new_zeros(1)]), sigmas[k:]
+
+
+def trajectory_noise(model, last, sigma):
+    """Noise the audio's flow path was on when the last step started at ``sigma`` (state = sigma * noise + (1 - sigma)
+    * clean), in stored-latent units: the sampler carries the audio scaled by the model's audio_scale."""
+    state, clean = last["x"].unbind()[1], last["x0"].unbind()[1]
+    noise = (state - (1.0 - sigma) * clean) / (sigma * model.get_model_object("model_sampling").audio_scale)
+    return noise.to(comfy.model_management.intermediate_device())
+
+
+def sample(model, positive, negative, cfg, sampler, sigmas, latent, seed, audio_noise=None, last=None):
+    """``audio_noise`` (see trajectory_noise) starts the audio stream on that path instead of fresh noise;
+    ``last``, when given, receives the state and clean estimate the final step started from."""
     guider = comfy.samplers.CFGGuider(model)
     guider.set_conds(positive, negative)
     guider.set_cfg(cfg)
     samples = latent["samples"]
-    callback = latent_preview.prepare_callback(model, sigmas.shape[-1] - 1)
-    out = guider.sample(comfy.sample.prepare_noise(samples, seed), samples, sampler, sigmas,
-                        denoise_mask=latent.get("noise_mask"), callback=callback,
+    noise = comfy.sample.prepare_noise(samples, seed)
+    if audio_noise is not None:
+        model_sampling = model.get_model_object("model_sampling")
+        video_noise, fresh = noise.unbind()
+        noise = NestedTensor((video_noise, (audio_noise * model_sampling.audio_scale / model_sampling.noise_scale).to(fresh)))
+    preview = latent_preview.prepare_callback(model, sigmas.shape[-1] - 1)
+
+    def callback(step, x0, x, total_steps):
+        if last is not None and step == total_steps - 1:
+            last.update(x=x, x0=x0)
+        preview(step, x0, x, total_steps)
+
+    out = guider.sample(noise, samples, sampler, sigmas, denoise_mask=latent.get("noise_mask"), callback=callback,
                         disable_pbar=not comfy.utils.PROGRESS_BAR_ENABLED, seed=seed)
     return out.to(comfy.model_management.intermediate_device())
 
