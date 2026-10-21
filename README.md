@@ -67,7 +67,7 @@
 - 不开自动改写时，全局提示词不参与生成，H3 只用每一镜的片段提示词。
 
 - 改写由 [deepagents](https://github.com/langchain-ai/deepagents) 智能体完成，加载 MiniMax 官方 [h3-prompt-writing](https://github.com/MiniMax-AI/MiniMax-H3/tree/main/skills/h3-prompt-writing) 技能（随插件放在 `h3-prompt-writing/`）。智能体在内存中的虚拟文件系统里读技能和写作指南，不读写本机文件，也没有 shell。
-- 智能体拿到的是导演台实际要生成的时间线：每镜的窗口时长、续接上一镜的重叠秒数、首尾帧和中间帧的对齐时间、参考素材标签（`<Picture N>` / `<Video N>` / `<Audio N>`）、声音锁定方式，以及每镜可选的“本镜要点”。它据此把剧情分到各镜，按 T2VA / I2VA / FL2VA / L2VA / Ref2VA 对应的官方格式写出完整提示词。开启“看图”时会把首尾帧、参考图和源视频画面一起发给模型。
+- 智能体拿到的是导演台实际要生成的时间线：每镜的窗口时长、续接上一镜的重叠秒数、首尾帧和中间帧的对齐时间、参考素材标签（`<Picture N>` / `<Video N>` / `<Audio N>`）、声音锁定方式，以及每镜可选的“本镜要点”。它据此把剧情分到各镜，按 T2VA / I2VA / FL2VA / L2VA / Ref2VA 对应的官方格式写出完整提示词。智能体先列出每镜的分镜要点，再按时间顺序一镜一镜写、一镜一镜提交，写后一镜时前面各镜的提示词都在上下文里。开启“看图”时会把首尾帧、参考图和源视频（从入点那一帧）发给模型，全局参考图只发一次。
 - 每镜单独缓存。只有这一镜的设置变了，或它继承的全局提示词 / 全局要求变了才重写；续接镜头会随上一镜一起重写。“全部重新改写”换一版结果。
 - “生成剧本”只改写不渲染，结果与运行共用缓存。满意的某一镜可以“采用为手写”，之后就固定不再改写。
 - 改写模型节点：`openai`（含 OpenAI 兼容接口，填 `base_url`）、`anthropic`、`ollama`。模型需要支持工具调用。`api_key` 留空时读取环境变量 `OPENAI_API_KEY` / `ANTHROPIC_API_KEY`（`base_url` 留空读 `OPENAI_BASE_URL`）；填写的 key 会保存在工作流里。`max_tokens` 默认 8192：OpenRouter 等服务在不设上限时会按模型最大输出预扣额度。OpenRouter 用 `openai` + `base_url=https://openrouter.ai/api/v1`，模型如 `anthropic/claude-opus-5.5`。

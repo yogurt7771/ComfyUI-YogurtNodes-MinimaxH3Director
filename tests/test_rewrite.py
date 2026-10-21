@@ -1,3 +1,5 @@
+import base64
+from io import BytesIO
 import json
 from pathlib import Path
 import tempfile
@@ -6,7 +8,7 @@ import unittest
 import numpy as np
 from PIL import Image
 
-from support import load
+from support import load, write_video
 
 director = load()
 rewrite = director.rewrite
@@ -36,8 +38,21 @@ class ScriptedModel(BaseChatModel):
         return ChatResult(generations=[ChatGeneration(message=self.replies.pop(0))])
 
 
-def answer(segments):
-    return AIMessage(content="", tool_calls=[{"name": "submit_prompts", "id": "out", "args": {"segments": segments}}])
+def submit(shot_id, prompt):
+    return AIMessage(content="", tool_calls=[{"name": "submit_prompt", "id": f"out-{shot_id}", "args": {"id": shot_id, "prompt": prompt}}])
+
+
+def answers(prompts):
+    return [submit(shot_id, prompt) for shot_id, prompt in prompts.items()] + [DONE]
+
+
+def tool_reply(messages):
+    return [m for m in messages if isinstance(m, ToolMessage)][-1].content
+
+
+def brightness(block):
+    data = base64.b64decode(block["image_url"]["url"].split(",", 1)[1])
+    return np.asarray(Image.open(BytesIO(data))).mean()
 
 
 DONE = AIMessage(content="Done.")
@@ -78,15 +93,17 @@ class RewriteTests(unittest.TestCase):
             next(s for s in shots if s["id"] == shot_id).update(fields)
         return director.project.load_project(json.dumps(data))
 
-    def run_rewrite(self, project):
-        return rewrite.rewrite_project(project, CONFIG, director.media.Media())
+    def run_rewrite(self, project, event=None):
+        return rewrite.rewrite_project(project, CONFIG, director.media.Media(), event)
 
-    def test_agent_reads_the_skill_and_gets_the_timeline(self):
-        self.model.replies = [READ_SKILL, answer([{"id": i, "prompt": f"prompt {i}"} for i in "abc"]), DONE]
-        project, prompts, report = self.run_rewrite(self.project())
+    def test_agent_reads_the_skill_and_writes_segment_by_segment(self):
+        self.model.replies = [READ_SKILL] + answers({i: f"prompt {i}" for i in "abc"})
+        events = []
+        project, prompts, report = self.run_rewrite(self.project(), lambda index, stage: events.append((index, stage)))
         self.assertEqual(prompts, {"a": "prompt a", "b": "prompt b", "c": "prompt c"})
         self.assertEqual([s["prompt"] for s in project["shots"]], ["prompt a", "prompt b", "prompt c"])
-        first, second, third = self.model.seen
+        self.assertEqual(events, [(0, "rewriting"), (1, "rewriting"), (2, "rewriting")])
+        first, second, third, fourth, last = self.model.seen
         system = first[0].content if isinstance(first[0].content, str) else json.dumps(first[0].content, ensure_ascii=False)
         self.assertIn("h3-prompt-writing", system)
         human = first[1].content
@@ -99,18 +116,22 @@ class RewriteTests(unittest.TestCase):
         self.assertTrue(any(block.get("type") == "image_url" for block in human[1:]))
         skill = next(m for m in second if isinstance(m, ToolMessage))
         self.assertIn("H3 Prompt Writing", skill.content)
-        self.assertIn("submit_prompts", self.model.tools)
-        self.assertEqual(next(m for m in third if isinstance(m, ToolMessage) and m.name == "submit_prompts").content, "All prompts saved. You are done.")
+        self.assertIn("submit_prompt", self.model.tools)
+        self.assertEqual(tool_reply(third), "Saved segment 1 (1/3). Next: segment 2 (id `b`).")
+        # Segment 2 is written with segment 1's prompt already in the conversation.
+        self.assertTrue(any(isinstance(m, AIMessage) and m.tool_calls and m.tool_calls[0]["args"].get("prompt") == "prompt a" for m in third))
+        self.assertEqual(tool_reply(fourth), "Saved segment 2 (2/3). Next: segment 3 (id `c`).")
+        self.assertEqual(tool_reply(last), "All 3 segments saved. You are done.")
         self.assertTrue(report[0].startswith("改写：第 1、2、3 镜"))
 
     def test_only_changed_segments_are_rewritten(self):
-        self.model.replies = [answer([{"id": i, "prompt": f"v1 {i}"} for i in "abc"]), DONE]
+        self.model.replies = answers({i: f"v1 {i}" for i in "abc"})
         self.run_rewrite(self.project())
         _, prompts, report = self.run_rewrite(self.project())
         self.assertEqual(prompts["b"], "v1 b")
         self.assertEqual(report, ["改写读取缓存：第 1、2、3 镜"])
 
-        self.model.replies = [answer([{"id": "c", "prompt": "v2 c"}]), DONE]
+        self.model.replies = answers({"c": "v2 c"})
         _, prompts, _ = self.run_rewrite(self.project(c={"prompt": "咖啡馆里看窗外"}))
         self.assertEqual((prompts["a"], prompts["c"]), ("v1 a", "v2 c"))
         task = self.model.seen[-1][1].content[0]["text"].split("# Task")[1]
@@ -118,12 +139,12 @@ class RewriteTests(unittest.TestCase):
         self.assertNotIn("`a`", task)
 
         # A continued segment follows its predecessor's new prompt.
-        self.model.replies = [answer([{"id": "a", "prompt": "v3 a"}, {"id": "b", "prompt": "v3 b"}]), DONE]
+        self.model.replies = answers({"a": "v3 a", "b": "v3 b"})
         _, prompts, _ = self.run_rewrite(self.project(a={"prompt": "她撑着伞"}, c={"prompt": "咖啡馆里看窗外"}))
         self.assertEqual((prompts["a"], prompts["b"], prompts["c"]), ("v3 a", "v3 b", "v2 c"))
 
     def test_locked_shot_is_context_only(self):
-        self.model.replies = [answer([{"id": "a", "prompt": "pa"}, {"id": "b", "prompt": "pb"}]), DONE]
+        self.model.replies = answers({"a": "pa", "b": "pb"})
         project, prompts, _ = self.run_rewrite(self.project(c={"rewrite": False, "prompt": "Handwritten cafe prompt."}))
         self.assertNotIn("c", prompts)
         self.assertEqual(project["shots"][2]["prompt"], "Handwritten cafe prompt.")
@@ -135,28 +156,45 @@ class RewriteTests(unittest.TestCase):
         project = director.project.load_project(json.dumps({**{k: v for k, v in project.items() if k != "shots"},
                                                              "refs": {"images": [hero]},
                                                              "shots": [{**s, "refs": {"images": [], "videos": [], "audios": []}} for s in project["shots"]]}))
-        self.model.replies = [answer([{"id": i, "prompt": f"v1 {i}"} for i in "abc"]), DONE]
+        self.model.replies = answers({i: f"v1 {i}" for i in "abc"})
         self.run_rewrite(project)
-        text = self.model.seen[0][1].content[0]["text"]
+        human = self.model.seen[0][1].content
+        text = human[0]["text"]
         segment_c = text.split("## Segment 3")[1]
         self.assertIn("Does not use the global prompt", segment_c)
         self.assertIn("<Picture 1>: global reference image, the same in every segment", text.split("## Segment 2")[1])
+        # The global image is attached once, not once per inheriting segment.
+        captions = [block["text"] for block in human[1:] if block["type"] == "text"]
+        self.assertEqual(sum("Global reference image 1" in c for c in captions), 1)
+        self.assertFalse(any(c.startswith("Segment") and "global reference" in c for c in captions))
 
         # Editing the global prompt rewrites the inheriting segments only.
         project["story"] = "清晨的海边，一个穿红雨衣的女孩在散步。"
-        self.model.replies = [answer([{"id": "a", "prompt": "v2 a"}, {"id": "b", "prompt": "v2 b"}]), DONE]
+        self.model.replies = answers({"a": "v2 a", "b": "v2 b"})
         _, prompts, _ = self.run_rewrite(project)
         self.assertEqual(prompts, {"a": "v2 a", "b": "v2 b", "c": "v1 c"})
 
-    def test_agent_is_told_what_is_missing_and_can_finish(self):
-        self.model.replies = [answer([{"id": "a", "prompt": "pa"}]), answer([{"id": "b", "prompt": "pb"}, {"id": "c", "prompt": "pc"}]), DONE]
+    def test_batched_and_repeated_submissions(self):
+        # Tool calls of one message run concurrently; all of them must land.
+        batch = AIMessage(content="", tool_calls=[{"name": "submit_prompt", "id": f"p{i}", "args": {"id": i, "prompt": f"p{i}"}} for i in "ab"])
+        self.model.replies = [submit("c", "pc"), batch, submit("a", "pa fixed"), DONE]
         _, prompts, _ = self.run_rewrite(self.project())
-        self.assertEqual(prompts, {"a": "pa", "b": "pb", "c": "pc"})
-        feedback = next(m for m in self.model.seen[1] if isinstance(m, ToolMessage))
-        self.assertEqual(feedback.content, "Saved. Still missing: b, c.")
+        self.assertEqual(prompts, {"a": "pa fixed", "b": "pb", "c": "pc"})
+        self.assertEqual(tool_reply(self.model.seen[1]), "Saved segment 3 (1/3). Next: segment 1 (id `a`).")
+
+    def test_source_video_is_shown_from_its_start(self):
+        write_video(Path(self.tmp.name) / "input" / "clip.mp4", 48, 128, 64)
+        source = {"media": {"filename": "clip.mp4", "subfolder": "", "type": "input"}, "start": 36, "regen": True}
+        project = director.project.load_project(json.dumps({"width": 128, "height": 64, "rewrite": {"enabled": True},
+                                                            "shots": [{"id": "s", "kind": "source", "frames": 12, "prompt": "换成白天", "source": source}]}))
+        self.model.replies = answers({"s": "day"})
+        self.run_rewrite(project)
+        human = self.model.seen[0][1].content
+        self.assertIn("<Video 1>: the source video this segment rewrites", human[0]["text"])
+        self.assertAlmostEqual(brightness(human[2]), 255 * 36 / 47, delta=4)
 
     def test_unsubmitted_segment_is_an_error(self):
-        self.model.replies = [answer([{"id": "a", "prompt": "pa"}]), DONE]
+        self.model.replies = answers({"a": "pa"})
         with self.assertRaisesRegex(RuntimeError, "没有交回第 2、3 镜"):
             self.run_rewrite(self.project())
 

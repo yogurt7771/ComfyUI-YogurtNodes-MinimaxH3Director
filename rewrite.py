@@ -12,7 +12,6 @@ from io import BytesIO
 from pathlib import Path
 
 from PIL import Image
-from pydantic import BaseModel, Field
 
 import comfy.model_management
 from comfy_api.latest import io
@@ -22,7 +21,7 @@ from .cache import digest
 from .conditioning import video_size
 from .project import FPS, plan_windows
 
-VERSION = "rewrite-1"
+VERSION = "rewrite-2"
 SKILL = Path(__file__).resolve().parent / "h3-prompt-writing"
 PROVIDERS = ("openai", "anthropic", "ollama")
 Rewriter = io.Custom("YOGURT_H3_REWRITER")
@@ -51,12 +50,10 @@ describe that state first without a cut, then continue the action.
 Use exactly the labels listed for a segment (<Picture N>, <Video N>, <Audio N>) and no others. Keep dialogue \
 in the language the user wrote it in, using the guide's dialogue markup.
 
-When the prompts are finished, call `submit_prompts` with one entry per requested segment id."""
-
-
-class SegmentPrompt(BaseModel):
-    id: str = Field(description="Segment id exactly as given in the task")
-    prompt: str = Field(description="The complete H3 prompt for this segment, in the guide's final structure")
+Work in two steps. First write /plan.md: one beat per requested segment in timeline order, with the \
+characters, wardrobe, setting and sound that carry across segments. Then write the requested segments one at \
+a time in timeline order: finish one segment's prompt, submit it with `submit_prompt`, and only then start the \
+next, continuing from the prompts already written."""
 
 
 def rewriter_config(provider, model, base_url="", api_key="", temperature=0.7, max_tokens=8192, vision=True):
@@ -197,19 +194,43 @@ def _image_block(image, caption):
             {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64," + base64.b64encode(buffer.getvalue()).decode()}}]
 
 
+def _video_frame(media, item, start):
+    width, height = video_size(media, item)
+    scale = 512 / max(width, height)
+    return media.video(item, start, 1, max(2, round(width * scale)), max(2, round(height * scale)), "disabled")
+
+
+def _visible(media, item):
+    return item is not None and ("input" not in item or item["input"] in media.inputs)
+
+
+def global_attachments(project, targets, media):
+    """Global references once for the whole request, instead of once per segment that inherits them."""
+    if not any(w.shot["inherit_refs"] for w in targets):
+        return []
+    refs, blocks = project["refs"], []
+    for i, item in enumerate(refs["images"]):
+        if _visible(media, item):
+            blocks += _image_block(media.image(item), f"Global reference image {i + 1} (<Picture {i + 1}> in every segment that uses global references):")
+    for i, video in enumerate(refs["videos"]):
+        if _visible(media, video["media"]):
+            blocks += _image_block(_video_frame(media, video["media"], 0),
+                                   f"Global reference video {i + 1}, first frame (its <Video N> label is listed in each segment):")
+    return blocks
+
+
 def attachments(window, media):
-    """Images the model can look at: labelled keyframes / references, guide frames and the first frame of videos."""
+    """The segment's own images: keyframes, its references, guide frames and the opening frame of its videos."""
     shot = window.shot
     blocks = []
     mode, items = labels(window)
     for label, text, item in items:
-        if item is None or ("input" in item and item["input"] not in media.inputs):
+        if not _visible(media, item) or text.startswith("global reference"):
             continue
         caption = f"Segment {window.index + 1} {label} ({text}):"
         if label.startswith("<Video"):
-            width, height = video_size(media, item)
-            scale = 512 / max(width, height)
-            image = media.video(item, 0, 1, max(2, round(width * scale)), max(2, round(height * scale)), "disabled")
+            source = shot["source"]
+            image = _video_frame(media, item, source["start"] if source and item is source["media"] else 0)
         else:
             image = media.image(item)
         blocks += _image_block(image, caption)
@@ -261,10 +282,7 @@ def rewrite_project(project, config, media, event=None):
             targets.append(window)
     report = []
     if targets:
-        for window in targets:
-            if event:
-                event(window.index, "rewriting")
-        written = _write(project, windows, targets, prompts, config, media, skill)
+        written = _write(project, windows, targets, prompts, config, media, skill, event)
         prompts.update(written)
         for window in targets:
             previous = windows[window.index - 1].shot if window.carry else None
@@ -298,48 +316,59 @@ def _message(project, windows, targets, prompts, config, media):
             fixed = prompts.get(shot["id"], shot["prompt"]).strip() or "(no prompt)"
             text.append(f"## Segment {window.index + 1} — id `{shot['id']}` (fixed, {_seconds(window.gen)} s; do not rewrite)\n{fixed}")
     ids = ", ".join(f"`{w.shot['id']}`" for w in targets)
-    text.append(f"# Task\nWrite the prompts for segments {ids}.")
+    text.append(f"# Task\nWrite the prompts for segments {ids}, one at a time in this order.")
     content = [{"type": "text", "text": "\n\n".join(text)}]
     if config["vision"]:
+        content += global_attachments(project, targets, media)
         for window in targets:
             content += attachments(window, media)
     return HumanMessage(content=content)
 
 
-def submit_tool(target_ids, written):
-    """The agent hands in prompts through an ordinary tool: forced structured-output tool calls are refused by
-    reasoning models such as Claude Opus, and the reply lists what is still missing so the agent can finish."""
+def submit_tool(targets, written, event=None):
+    """The agent hands in one segment per call, so each segment is written with the earlier ones already in its
+    context. Calls batched in one message run concurrently, so the order is guided by the replies, not enforced.
+    An ordinary tool also avoids the forced tool choice that reasoning models such as Claude Opus refuse."""
     from langchain_core.tools import tool
 
+    order = [w.shot["id"] for w in targets]
+    number = {w.shot["id"]: w.index + 1 for w in targets}
+
     @tool
-    def submit_prompts(segments: list[SegmentPrompt]) -> str:
-        """Submit finished H3 prompts, one entry per segment id. Can be called again; a later prompt replaces an earlier one."""
-        for item in segments:
-            item = SegmentPrompt.model_validate(item) if isinstance(item, dict) else item
-            if item.id not in target_ids:
-                return f"Unknown segment id `{item.id}`. Requested ids: {', '.join(target_ids)}. Nothing was saved from this call."
-            written[item.id] = item.prompt.strip()
-        missing = [i for i in target_ids if not written.get(i)]
-        return f"Saved. Still missing: {', '.join(missing)}." if missing else "All prompts saved. You are done."
+    def submit_prompt(id: str, prompt: str) -> str:
+        """Submit the finished H3 prompt of one segment. Submit segments one at a time in timeline order;
+        submitting a segment again replaces its prompt."""
+        if id not in number:
+            return f"Unknown segment id `{id}`. Requested ids in order: {', '.join(order)}."
+        if not prompt.strip():
+            return "The prompt is empty; submit the complete H3 prompt."
+        written[id] = prompt.strip()
+        pending = [i for i in order if i not in written]
+        if not pending:
+            return f"All {len(order)} segments saved. You are done."
+        if event:
+            event(number[pending[0]] - 1, "rewriting")
+        return f"Saved segment {number[id]} ({len(order) - len(pending)}/{len(order)}). Next: segment {number[pending[0]]} (id `{pending[0]}`)."
 
-    return submit_prompts
+    return submit_prompt
 
 
-def _write(project, windows, targets, prompts, config, media, skill):
+def _write(project, windows, targets, prompts, config, media, skill, event=None):
     try:
         from deepagents import create_deep_agent
         from deepagents.backends.utils import create_file_data
     except ImportError as error:
         raise RuntimeError("提示词改写需要 deepagents：在 ComfyUI 的 Python 环境中 pip install deepagents。") from error
-    target_ids = [w.shot["id"] for w in targets]
     written = {}
-    agent = create_deep_agent(model=chat_model(config), tools=[submit_tool(target_ids, written)], system_prompt=SYSTEM_PROMPT,
+    if event:
+        event(targets[0].index, "rewriting")
+    agent = create_deep_agent(model=chat_model(config), tools=[submit_tool(targets, written, event)], system_prompt=SYSTEM_PROMPT,
                               skills=["/skills/"], name="yogurt-h3-screenwriter")
     inputs = {"messages": [_message(project, windows, targets, prompts, config, media)],
               "files": {path: create_file_data(text) for path, text in skill.items()}}
-    for _ in agent.stream(inputs, config={"recursion_limit": 200}, stream_mode="values"):
+    for _ in agent.stream(inputs, config={"recursion_limit": 100 + 10 * len(targets)}, stream_mode="values"):
         comfy.model_management.throw_exception_if_processing_interrupted()
     missing = [w.index + 1 for w in targets if not written.get(w.shot["id"])]
     if missing:
         raise RuntimeError(f"改写模型没有交回第 {'、'.join(map(str, missing))} 镜的提示词。")
-    return {i: written[i] for i in target_ids}
+    return {w.shot["id"]: written[w.shot["id"]] for w in targets}
