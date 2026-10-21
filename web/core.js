@@ -15,11 +15,14 @@ export const clamp = (v, lo, hi) => Math.min(Math.max(v, lo), hi);
 export const secs = frames => `${(frames / FPS).toFixed(2)}s`;
 export const clone = value => JSON.parse(JSON.stringify(value));
 
+/** Every image or video the rewrite AI could see: shown to it by default, or kept private with optional words instead. */
+export const SHARED = { share: true, description: "" };
+
 export function newShot(kind = "generate") {
     return {
         id: uid(), kind, frames: 121, prompt: "", continue: kind === "generate", seed: 0, keyframes: [],
         refs: { images: [], videos: [], audios: [] },
-        source: kind === "source" ? { media: null, start: 0, regen: false, strength: 1 } : null,
+        source: kind === "source" ? { media: null, start: 0, regen: false, strength: 1, ...SHARED } : null,
         audio: kind === "source" ? "source" : "generate", repaints: [], details: [], refine: true, rewrite: true,
         inherit_refs: true, inherit_prompt: true, ref_strength: 1,
     };
@@ -33,15 +36,16 @@ export function newProject() {
 }
 
 // Reference images carry how they meet the canvas (older projects stored bare media), videos the frame they start at.
-const refsOf = refs => ({ audios: [], ...refs, images: (refs?.images || []).map(m => (m.media ? { fit: "auto", ...m } : { media: m, fit: "auto" })),
-    videos: (refs?.videos || []).map(v => ({ audio: false, start: 0, ...v })) });
+const refsOf = refs => ({ audios: [], ...refs,
+    images: (refs?.images || []).map(m => (m.media ? { fit: "auto", ...SHARED, ...m } : { media: m, fit: "auto", ...SHARED })),
+    videos: (refs?.videos || []).map(v => ({ audio: false, start: 0, ...SHARED, ...v })) });
 
 export function normalize(project) {
     const base = newProject();
     const out = { ...base, ...project, rewrite: { ...base.rewrite, ...(project?.rewrite || {}) }, refs: refsOf(project?.refs) };
     out.shots = (project?.shots || []).map(shot => {
         const fresh = newShot(shot.kind === "source" ? "source" : "generate");
-        return { ...fresh, ...shot, refs: refsOf(shot.refs), keyframes: (shot.keyframes || []).map(k => ({ fit: "auto", ...k })),
+        return { ...fresh, ...shot, refs: refsOf(shot.refs), keyframes: (shot.keyframes || []).map(k => ({ fit: "auto", ...SHARED, ...k })),
             source: shot.kind === "source" ? { ...fresh.source, ...(shot.source || {}) } : null };
     });
     if (!out.shots.length) out.shots = [newShot()];

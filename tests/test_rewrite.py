@@ -187,6 +187,26 @@ class RewriteTests(unittest.TestCase):
         self.assertEqual(prompts, {"a": "pa fixed", "b": "pb", "c": "pc"})
         self.assertEqual(tool_reply(self.model.seen[1]), "Saved segment 3 (1/3). Next: segment 1 (id `a`).")
 
+    def test_private_media_stay_out_of_the_model_context(self):
+        hero = {"filename": "first.png", "subfolder": "", "type": "input"}
+        project = director.project.load_project(json.dumps({
+            "story": "雨夜街头。", "rewrite": {"enabled": True},
+            "refs": {"images": [{"media": hero, "share": False, "description": "穿红雨衣的短发女孩"}]},
+            "shots": [{"id": "a", "frames": 48, "prompt": "", "refs": {"images": [{"media": hero}, {"media": hero, "share": False}]},
+                       "keyframes": [{"at": 20, "media": hero, "share": False, "description": "她回头的瞬间"}]}]}), SIZE)
+        self.model.replies = answers({"a": "pa"})
+        self.run_rewrite(project)
+        human = self.model.seen[0][1].content
+        text = human[0]["text"]
+        self.assertIn("<Picture 1>: global reference image, the same in every segment; not shown to you for privacy, "
+                      "the user describes it as: 穿红雨衣的短发女孩.", text)
+        self.assertIn("<Picture 3>: reference image; not shown to you for privacy and not described", text)
+        self.assertIn("guide image pins the picture at 0.83 s; describe that moment consistently with it; not shown to you for privacy, "
+                      "the user describes it as: 她回头的瞬间.", text)
+        # Only the shared reference image goes out: not the private global one, the private own one or the private guide.
+        captions = [block["text"] for block in human[1:] if block["type"] == "text"]
+        self.assertEqual((captions, sum(block["type"] == "image_url" for block in human)), (["Segment 1 <Picture 2> (reference image):"], 1))
+
     def test_source_video_is_shown_from_its_start(self):
         write_video(Path(self.tmp.name) / "input" / "clip.mp4", 48, 128, 64)
         source = {"media": {"filename": "clip.mp4", "subfolder": "", "type": "input"}, "start": 36, "regen": True}

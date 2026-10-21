@@ -2,7 +2,7 @@
 import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
 import {
-    FPS, STAGES, changed, clamp, clone, effectiveRefs, features, graphInputs, h, isAudio, isVideo, mediaLabel, mediaUrl, refCount,
+    FPS, SHARED, STAGES, changed, clamp, clone, effectiveRefs, features, graphInputs, h, isAudio, isVideo, mediaLabel, mediaUrl, refCount,
     newShot, pickFile, planWindows, previewRewrite, projectData, readProject, rewritable, rewriterConfig, secs, storePrompts, totalFrames, uid,
     upload, widget, writeProject,
 } from "./core.js";
@@ -771,7 +771,8 @@ class Editor {
             this.seg([["generate", "生成"], ["source", "源视频"]], shot.kind, kind => this.setKind(kind))));
         if (shot.kind === "source") {
             parts.push(this.field("源视频（24fps 时间轴，可为任意帧率）",
-                this.slot(shot.source.media, { accept: "video/*", graph: ["video", "image"], onpick: m => { shot.source.media = m; this.commit(true); } })));
+                this.slot(shot.source.media, { accept: "video/*", graph: ["video", "image"], onpick: m => { shot.source.media = m; this.commit(true); } }),
+                this.privacy(shot.source)));
             parts.push(this.field("起点（秒）", this.number(shot.source, "start", { min: 0, step: 1 / FPS, scale: FPS, after: () => this.renderStage() })));
             parts.push(h("div.dim", {}, shot.source.media?.input ? "连线的源视频在运行前看不到画面，按秒设置起点。"
                 : "剪辑素材：在舞台下方的素材条上拖动选区，选出这一镜用到的那一段；拖选区右缘改时长，或播放到某一帧按 I / O 设入点 / 出点。"));
@@ -874,7 +875,7 @@ class Editor {
         const shot = this.shot;
         if (shot.kind === kind) return;
         shot.kind = kind;
-        shot.source = kind === "source" ? { media: null, start: 0, regen: false, strength: 1 } : null;
+        shot.source = kind === "source" ? { media: null, start: 0, regen: false, strength: 1, ...SHARED } : null;
         shot.audio = kind === "source" ? "source" : "generate";
         shot.continue = kind === "generate";
         this.commit(true);
@@ -884,9 +885,9 @@ class Editor {
         const shot = this.shot, w = this.win;
         const find = at => shot.keyframes.find(k => k.at === at);
         const put = (at, media) => {
-            const fit = find(at)?.fit || "auto";
+            const kept = find(at) || { fit: "auto", ...SHARED };
             shot.keyframes = shot.keyframes.filter(k => k.at !== at);
-            if (media) shot.keyframes.push({ at, media, fit });
+            if (media) shot.keyframes.push({ ...kept, at, media });
             this.commit(true);
         };
         const ends = [[0, "首帧"], [-1, "尾帧"]].filter(([at]) => find(at));
@@ -900,25 +901,37 @@ class Editor {
             h("div.slots", {},
                 this.slot(find(0)?.media, { tag: "首帧", capture: true, onpick: m => put(0, m) }),
                 this.slot(find(-1)?.media, { tag: "尾帧", capture: true, onpick: m => put(-1, m) })),
-            ends.length ? h("div.row", {}, ...ends.map(([at, label]) => h("label.row", {}, label, this.fitSelect(find(at), "自动（首帧拉伸，其余裁剪）")))) : null,
+            ends.length ? h("div.slots", {}, ...ends.map(([at, label]) => h("div.field", {},
+                h("label.row", {}, label, this.fitSelect(find(at), "自动（首帧拉伸，其余裁剪）")), this.privacy(find(at))))) : null,
             h("b", {}, "中间关键帧"),
             ...middles.map(k => h("div.card", {},
                 h("div.row", {}, h("span", {}, "第"), this.number(k, "at", { min: 1, max: w.keep - 2, after: () => this.commit(true) }), h("span", {}, `帧（${secs(k.at)}）`),
                     h("span.grow"), h("button.danger", { onclick: () => { shot.keyframes.splice(shot.keyframes.indexOf(k), 1); this.commit(true); } }, "删除")),
                 this.slot(k.media, { capture: true, onpick: m => { if (m) { k.media = m; } else { shot.keyframes.splice(shot.keyframes.indexOf(k), 1); } this.commit(true); } }),
-                h("label.row", {}, "适配画幅", this.fitSelect(k, "自动（裁剪）")))),
+                h("label.row", {}, "适配画幅", this.fitSelect(k, "自动（裁剪）")), this.privacy(k))),
             h("button", {
                 onclick: async () => {
                     const at = clamp(this.frame, 1, w.keep - 2);
                     let media = null;
                     try { media = await this.captureFrame(); } catch { media = null; }
                     if (!media) { const file = await pickFile("image/*"); if (!file) return; media = await upload(file); }
-                    shot.keyframes.push({ at, media, fit: "auto" });
+                    shot.keyframes.push({ at, media, fit: "auto", ...SHARED });
                     this.commit(true);
                 },
             }, `+ 在当前帧（第 ${this.frame + 1} 帧）加关键帧`),
             h("div.dim", {}, "提示：“截取当前画面”可以把上一镜成片的最后一帧拿来做下一镜首帧，用于硬切后的人物衔接。"),
         ];
+    }
+
+    /** Whether the rewrite AI may see this image or video; a private one can be described in words instead (both optional). */
+    privacy(item) {
+        if (!item || !this.project.rewrite.enabled) return null;
+        return h("div.field", {},
+            this.check(item, "share", "发给改写 AI 看", () => this.renderInspector()),
+            item.share ? null : h("textarea", {
+                rows: 2, value: item.description || "", placeholder: "不发图片。可选：用文字描述它，代替图片告诉 AI",
+                oninput: e => { item.description = e.target.value; this.commit(); },
+            }));
     }
 
     /** How an image meets the canvas; "auto" is H3's own rule for that slot. */
@@ -934,14 +947,14 @@ class Editor {
             this.slot(null, { ...options, onpick: m => { if (m) { items.push(options.wrap ? options.wrap(m) : m); this.commit(true); } } }));
         return [
             h("span.dim", {}, `图片 ${refs.images.length}`),
-            list(refs.images, { accept: "image/*", wrap: m => ({ media: m, fit: "auto" }) }, (m, i) => h("div.field", {},
+            list(refs.images, { accept: "image/*", wrap: m => ({ media: m, fit: "auto", ...SHARED }) }, (m, i) => h("div.field", {},
                 this.slot(m.media, { tag: `<Picture ${offset.images + i + 1}>`, onpick: v => { v ? (m.media = v) : refs.images.splice(i, 1); this.commit(true); } }),
-                this.fitSelect(m, "原比例"))),
+                this.fitSelect(m, "原比例"), this.privacy(m))),
             h("span.dim", {}, `视频 ${refs.videos.length}`),
-            list(refs.videos, { accept: "video/*", graph: ["video", "image"], wrap: m => ({ media: m, audio: false, start: 0 }) }, (v, i) => h("div.field", {},
+            list(refs.videos, { accept: "video/*", graph: ["video", "image"], wrap: m => ({ media: m, audio: false, start: 0, ...SHARED }) }, (v, i) => h("div.field", {},
                 this.slot(v.media, { accept: "video/*", graph: ["video", "image"], tag: `<Video ${offset.videos + i + 1}>`,
                     onpick: m => { m ? (v.media = m) : refs.videos.splice(i, 1); this.commit(true); } }),
-                this.check(v, "audio", "带原声", () => this.commit(true)),
+                this.check(v, "audio", "带原声", () => this.commit(true)), this.privacy(v),
                 h("div.row", {}, "起点", this.number(v, "start", { min: 0, step: 1 / FPS, scale: FPS, after: () => this.renderStage() }), "秒",
                     mediaUrl(v.media) ? h("button", { onclick: () => { this.stopTools(); this.trim = { clip: v, tag: `<Video ${offset.videos + i + 1}>` }; this.renderStage(); },
                         title: "在舞台下方的素材条上选择参考的片段" }, "截取") : null))),

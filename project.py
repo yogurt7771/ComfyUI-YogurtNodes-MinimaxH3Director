@@ -107,13 +107,18 @@ def _fit(value):
     return value if value in FITS else "auto"
 
 
+def _privacy(raw):
+    """Whether the prompt-rewriting model may see this media, and the user's optional words for it instead."""
+    return {"share": bool(raw.get("share", True)), "description": str(raw.get("description") or "")}
+
+
 def _refs(raw):
     raw = raw or {}
     # ``start`` is the 24 fps frame of the material where the reference clip begins.
-    videos = [{"media": media(item["media"]), "audio": bool(item.get("audio")), "start": _int(item.get("start"), 0, 0, 10**7)}
+    videos = [{"media": media(item["media"]), "audio": bool(item.get("audio")), "start": _int(item.get("start"), 0, 0, 10**7), **_privacy(item)}
               for item in raw.get("videos") or [] if isinstance(item, dict) and media(item.get("media"))]
     # Reference images used to be stored as bare media; both forms are read.
-    images = [{"media": media(item.get("media", item)), "fit": _fit(item.get("fit"))}
+    images = [{"media": media(item.get("media", item)), "fit": _fit(item.get("fit")), **_privacy(item)}
               for item in raw.get("images") or [] if isinstance(item, dict) and media(item.get("media", item))]
     return {"images": images, "videos": videos, "audios": _media_list(raw.get("audios"))}
 
@@ -129,7 +134,7 @@ def _shot(raw, index, global_refs):
     if kind == "source":
         raw_source = raw.get("source") or {}
         source = {"media": media(raw_source.get("media")), "start": _int(raw_source.get("start"), 0, 0, 10**7),
-                  "regen": bool(raw_source.get("regen")), "strength": _float(raw_source.get("strength"), 1.0, 0.05, 1.0)}
+                  "regen": bool(raw_source.get("regen")), "strength": _float(raw_source.get("strength"), 1.0, 0.05, 1.0), **_privacy(raw_source)}
         if source["media"] is None:
             raise ValueError(f"第 {index + 1} 镜是源视频镜头，但还没有选择源视频。")
     audio = raw.get("audio") if raw.get("audio") in AUDIO_MODES else ("source" if kind == "source" else "generate")
@@ -138,7 +143,7 @@ def _shot(raw, index, global_refs):
     keyframes = []
     for item in raw.get("keyframes") or []:
         if isinstance(item, dict) and media(item.get("media")):
-            keyframes.append({"at": _int(item.get("at"), 0, -1, 10**6), "media": media(item["media"]), "fit": _fit(item.get("fit"))})
+            keyframes.append({"at": _int(item.get("at"), 0, -1, 10**6), "media": media(item["media"]), "fit": _fit(item.get("fit")), **_privacy(item)})
     repaints = []
     for j, item in enumerate(raw.get("repaints") or []):
         if not isinstance(item, dict) or media(item.get("mask")) is None or item.get("enabled") is False:

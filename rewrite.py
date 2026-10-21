@@ -48,7 +48,8 @@ A continued segment opens inside the previous segment's last moment (same pictur
 describe that state first without a cut, then continue the action.
 
 Use exactly the labels listed for a segment (<Picture N>, <Video N>, <Audio N>) and no others. Keep dialogue \
-in the language the user wrote it in, using the guide's dialogue markup.
+in the language the user wrote it in, using the guide's dialogue markup. Some media are withheld from you for \
+privacy: write about them only what the user's description says, and never guess how they look.
 
 Work in two steps. First write /plan.md: one beat per requested segment in timeline order, with the \
 characters, wardrobe, setting and sound that carry across segments. Then write the requested segments one at \
@@ -123,7 +124,8 @@ def _seconds(frames):
 
 
 def labels(window):
-    """(label, description, media) in the order MiniMaxH3ReferenceToVideo / ImageToVideo present them."""
+    """(label, description, media, entry) in the order MiniMaxH3ReferenceToVideo / ImageToVideo present them;
+    ``entry`` is the project item carrying the user's privacy choice (None for audio)."""
     shot = window.shot
     refs = shot["refs"]
     if refs["images"] or refs["videos"] or refs["audios"] or (shot["source"] and shot["source"]["regen"]):
@@ -132,29 +134,39 @@ def labels(window):
         def scope(kind, i):
             return f"global reference {kind}, the same in every segment" if i < shared[kind + "s"] else f"reference {kind}"
 
-        out = [(f"<Picture {i + 1}>", scope("image", i), m["media"]) for i, m in enumerate(refs["images"])]
-        videos = ([("the source video this segment rewrites; keep its motion, framing and timing", shot["source"]["media"], False)]
+        out = [(f"<Picture {i + 1}>", scope("image", i), m["media"], m) for i, m in enumerate(refs["images"])]
+        videos = ([("the source video this segment rewrites; keep its motion, framing and timing", shot["source"], False)]
                   if shot["source"] and shot["source"]["regen"] else [])
-        videos += [(scope("video", i), v["media"], v["audio"]) for i, v in enumerate(refs["videos"])]
+        videos += [(scope("video", i), v, v["audio"]) for i, v in enumerate(refs["videos"])]
         audio = 0
-        for k, (text, item, with_audio) in enumerate(videos, 1):
+        for k, (text, entry, with_audio) in enumerate(videos, 1):
             if with_audio:
                 audio += 1
-                out.append((f"<Audio {audio}>", f"soundtrack of <Video {k}>", None))
-            out.append((f"<Video {k}>", text, item))
+                out.append((f"<Audio {audio}>", f"soundtrack of <Video {k}>", None, None))
+            out.append((f"<Video {k}>", text, entry["media"], entry))
         for i in range(len(refs["audios"])):
             audio += 1
-            out.append((f"<Audio {audio}>", scope("audio", i), None))
+            out.append((f"<Audio {audio}>", scope("audio", i), None, None))
         return "Ref2VA", out
-    frames = {window.frame(k["at"]): k["media"] for k in shot["keyframes"]}
+    frames = {window.frame(k["at"]): k for k in shot["keyframes"]}
     first, last = frames.get(0), frames.get(window.gen - 1)
     out = []
     if first is not None:
-        out.append(("<Picture 1>", "the first frame, aligned at 0.00 s", first))
+        out.append(("<Picture 1>", "the first frame, aligned at 0.00 s", first["media"], first))
     if last is not None:
-        out.append((f"<Picture {len(out) + 1}>", f"the last frame, aligned at {_seconds(window.gen - 1)} s", last))
+        out.append((f"<Picture {len(out) + 1}>", f"the last frame, aligned at {_seconds(window.gen - 1)} s", last["media"], last))
     mode = "FL2VA" if first is not None and last is not None else "I2VA" if first is not None else "L2VA" if last is not None else "T2VA"
     return mode, out
+
+
+def _withheld(entry):
+    """What the brief adds about media the user keeps out of the model's context, or a note they wrote for it."""
+    note = entry["description"].strip() if entry else ""
+    if entry is None or entry["share"]:
+        return f"; the user notes: {note}" if note else ""
+    if note:
+        return f"; not shown to you for privacy, the user describes it as: {note}"
+    return "; not shown to you for privacy and not described: refer to it only by its label and do not invent how it looks"
 
 
 def brief(window):
@@ -168,11 +180,12 @@ def brief(window):
                      f"(same picture, camera and sound). Open [Shot 1] in that moment, then continue; no new scene.")
     elif window.index:
         lines.append("- Hard cut from the previous segment.")
-    for label, text, _ in items:
-        lines.append(f"- {label}: {text}.")
-    pinned = {window.frame(k["at"]) for k in shot["keyframes"]}
+    for label, text, _, entry in items:
+        lines.append(f"- {label}: {text}{_withheld(entry)}.")
+    pinned = {window.frame(k["at"]): k for k in shot["keyframes"]}
     for index in sorted(i for i in pinned if mode == "Ref2VA" or i not in (0, window.gen - 1)):
-        lines.append(f"- An unlabeled guide image pins the picture at {_seconds(index)} s; describe that moment consistently with it.")
+        lines.append(f"- An unlabeled guide image pins the picture at {_seconds(index)} s; describe that moment consistently with it"
+                     f"{_withheld(pinned[index])}.")
     sound = {"generate": "generated by H3 with the picture; write overall_soundscape and non_diegetic_music.",
              "soundtrack": "locked to a prerecorded film soundtrack that H3 cannot change; match on-screen action and lip movement to it and keep the sound fields brief.",
              "source": "locked to the source video's original audio; keep the sound fields brief.",
@@ -211,11 +224,12 @@ def global_attachments(project, targets, media):
     if not any(w.shot["inherit_refs"] for w in targets):
         return []
     refs, blocks = project["refs"], []
-    for i, item in enumerate(m["media"] for m in refs["images"]):
-        if _visible(media, item):
+    for i, entry in enumerate(refs["images"]):
+        item = entry["media"]
+        if entry["share"] and _visible(media, item):
             blocks += _image_block(media.image(item), f"Global reference image {i + 1} (<Picture {i + 1}> in every segment that uses global references):")
     for i, video in enumerate(refs["videos"]):
-        if _visible(media, video["media"]):
+        if video["share"] and _visible(media, video["media"]):
             blocks += _image_block(_video_frame(media, video["media"], video["start"]),
                                    f"Global reference video {i + 1}, first frame (its <Video N> label is listed in each segment):")
     return blocks
@@ -229,8 +243,8 @@ def attachments(window, media):
     starts = {id(v["media"]): v["start"] for v in shot["refs"]["videos"]}
     if shot["source"]:
         starts[id(shot["source"]["media"])] = shot["source"]["start"]
-    for label, text, item in items:
-        if not _visible(media, item) or text.startswith("global reference"):
+    for label, text, item, entry in items:
+        if not _visible(media, item) or not entry["share"] or text.startswith("global reference"):
             continue
         caption = f"Segment {window.index + 1} {label} ({text}):"
         if label.startswith("<Video"):
@@ -241,7 +255,7 @@ def attachments(window, media):
     for k in shot["keyframes"]:
         index = window.frame(k["at"])
         if mode == "Ref2VA" or index not in (0, window.gen - 1):
-            if "input" in k["media"] and k["media"]["input"] not in media.inputs:
+            if not k["share"] or "input" in k["media"] and k["media"]["input"] not in media.inputs:
                 continue
             blocks += _image_block(media.image(k["media"]), f"Segment {window.index + 1} guide image at {_seconds(index)} s:")
     return blocks
