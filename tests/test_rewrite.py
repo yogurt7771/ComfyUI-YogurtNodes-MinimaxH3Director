@@ -99,10 +99,12 @@ class RewriteTests(unittest.TestCase):
     def test_agent_reads_the_skill_and_writes_segment_by_segment(self):
         self.model.replies = [READ_SKILL] + answers({i: f"prompt {i}" for i in "abc"})
         events = []
-        project, prompts, report = self.run_rewrite(self.project(), lambda index, stage: events.append((index, stage)))
+        project, prompts, report = self.run_rewrite(self.project(), lambda *event: events.append(event))
         self.assertEqual(prompts, {"a": "prompt a", "b": "prompt b", "c": "prompt c"})
         self.assertEqual([s["prompt"] for s in project["shots"]], ["prompt a", "prompt b", "prompt c"])
-        self.assertEqual(events, [(0, "rewriting"), (1, "rewriting"), (2, "rewriting")])
+        # Each prompt reaches the editor as soon as it is submitted.
+        self.assertEqual(events, [(0, "rewriting"), (0, "rewritten", "prompt a"), (1, "rewriting"), (1, "rewritten", "prompt b"),
+                                  (2, "rewriting"), (2, "rewritten", "prompt c")])
         first, second, third, fourth, last = self.model.seen
         system = first[0].content if isinstance(first[0].content, str) else json.dumps(first[0].content, ensure_ascii=False)
         self.assertIn("h3-prompt-writing", system)
@@ -127,9 +129,11 @@ class RewriteTests(unittest.TestCase):
     def test_only_changed_segments_are_rewritten(self):
         self.model.replies = answers({i: f"v1 {i}" for i in "abc"})
         self.run_rewrite(self.project())
-        _, prompts, report = self.run_rewrite(self.project())
+        events = []
+        _, prompts, report = self.run_rewrite(self.project(), lambda *event: events.append(event))
         self.assertEqual(prompts["b"], "v1 b")
         self.assertEqual(report, ["改写读取缓存：第 1、2、3 镜"])
+        self.assertEqual(events, [(0, "rewritten", "v1 a"), (1, "rewritten", "v1 b"), (2, "rewritten", "v1 c")])
 
         self.model.replies = answers({"c": "v2 c"})
         _, prompts, _ = self.run_rewrite(self.project(c={"prompt": "咖啡馆里看窗外"}))

@@ -50,10 +50,10 @@ class Models:
     scheduler: str
 
 
-def send_event(node_id, shot_id, stage):
+def send_event(node_id, shot_id, stage, prompt=None):
     server = getattr(PromptServer, "instance", None)
     if server is not None:
-        server.send_sync(EVENT, {"node": node_id, "shot": shot_id, "stage": stage})
+        server.send_sync(EVENT, {"node": node_id, "shot": shot_id, "stage": stage, "prompt": prompt})
 
 
 def _round32(value):

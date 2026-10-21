@@ -261,7 +261,10 @@ def _segment_key(window, project, config, skill, media, previous):
 
 
 def rewrite_project(project, config, media, event=None):
-    """(project with rewritten prompts, {shot id: prompt}, report lines). Only uncached segments call the model."""
+    """(project with rewritten prompts, {shot id: prompt}, report lines). Only uncached segments call the model.
+
+    ``event(index, stage, prompt=None)`` reports progress; every cached or newly written prompt is reported
+    as stage "rewritten" as soon as it is known, before rendering starts."""
     windows = plan_windows(project)
     skill = skill_files()
     skill_id = digest(skill)
@@ -278,6 +281,8 @@ def rewrite_project(project, config, media, event=None):
         key = _segment_key(window, project, config, skill_id, media, before)
         if cache.exists(key, ".json"):
             prompts[shot["id"]] = cache.read_json(key)["prompt"]
+            if event:
+                event(window.index, "rewritten", prompts[shot["id"]])
         else:
             targets.append(window)
     report = []
@@ -343,6 +348,8 @@ def submit_tool(targets, written, event=None):
         if not prompt.strip():
             return "The prompt is empty; submit the complete H3 prompt."
         written[id] = prompt.strip()
+        if event:
+            event(number[id] - 1, "rewritten", written[id])
         pending = [i for i in order if i not in written]
         if not pending:
             return f"All {len(order)} segments saved. You are done."

@@ -88,7 +88,8 @@ class YogurtH3Director(io.ComfyNode):
                 raise ValueError("工程打开了自动改写提示词，请把“Yogurt H3 改写模型”连接到导演台的 rewriter。")
             node_id = cls.hidden.unique_id
             windows = plan_windows(spec)
-            spec, prompts, report = rewrite_project(spec, rewriter, media, lambda index, stage: send_event(node_id, windows[index].shot["id"], stage))
+            spec, prompts, report = rewrite_project(spec, rewriter, media,
+                                                    lambda index, stage, prompt=None: send_event(node_id, windows[index].shot["id"], stage, prompt))
         models = Models(model, clip, vae, audio_vae, ref_model, refine_model, inpaint_patch, upscale_model,
                         sampler or comfy.samplers.sampler_object(sampler_name), sigmas, seed, steps, cfg, scheduler)
         render = Render(cls.hidden.unique_id, cls.hidden.prompt, spec, models, media,

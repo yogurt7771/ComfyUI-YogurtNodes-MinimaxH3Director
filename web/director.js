@@ -23,9 +23,10 @@ class Panel {
                 writeProject(node, project);
             },
         });
+        this.result = h("div.result");
         this.root = h("div.yh3.yh3-panel", {},
             h("header", {}, h("strong", {}, "H3 导演台"), this.meta, h("button.primary", { onclick: () => this.open() }, "打开导演台")),
-            this.strip, this.quick, this.prompt,
+            this.strip, this.quick, this.prompt, this.result,
             h("div.row", {}, this.status, h("span.grow"),
                 h("button", { onclick: () => this.addShot() }, "+ 镜头"),
                 h("button.primary", { onclick: () => { app.queuePrompt(0, 1); this.say("已加入队列。"); } }, "▶ 运行")));
@@ -68,12 +69,14 @@ class Panel {
         const project = readProject(this.node);
         this.selected = clamp(this.selected, 0, project.shots.length - 1);
         const windows = planWindows(project), total = Math.max(1, totalFrames(project));
+        const prompts = this.node.properties?.yh3Prompts || {};
+        const shown = shot => (rewritable(project, shot) && prompts[shot.id]) || shot.prompt;
         this.meta.textContent = `${project.width}×${project.height} · ${project.shots.length} 镜 · ${secs(total)}`;
         this.strip.replaceChildren(...windows.map(w => {
             const state = this.states[w.shot.id];
             return h(`button.block${w.shot.kind === "source" ? ".source" : ""}${w.index === this.selected ? ".selected" : ""}`, {
                 style: { flex: `${w.keep} 1 0` }, "data-state": state === "complete" ? "complete" : state ? "running" : "",
-                title: `${w.shot.prompt || "（无提示词）"}\n${secs(w.keep)}`,
+                title: `${shown(w.shot) || "（无提示词）"}\n${secs(w.keep)}`,
                 onclick: () => this.select(w.index), ondblclick: () => this.open(w.index),
             }, windows[w.index + 1]?.head ? h("i.carry", { style: { width: `${Math.min(100, 100 * windows[w.index + 1].head / w.keep)}%` } }) : null, h("i.state"),
                 h("b", {}, `${w.index + 1} · ${secs(w.keep)}`),
@@ -102,7 +105,10 @@ class Panel {
             h("label.row", {}, "时长", seconds, "秒"), h("label.row", {}, carry, "续接上一镜"),
             h("span.dim", {}, `输出 ${w.keep} 帧`));
         if (document.activeElement !== this.prompt) this.prompt.value = shot.prompt;
-        this.prompt.placeholder = rewritable(project, shot) ? "本镜要点（自动改写开启，可留空）" : "本镜提示词";
+        const auto = rewritable(project, shot);
+        this.prompt.placeholder = auto ? "本镜要点（自动改写开启，可留空）" : "本镜提示词";
+        this.result.hidden = !auto;
+        this.result.replaceChildren(h("b", {}, "改写结果　"), prompts[shot.id] || "（运行，或在导演台“剧本”页点“生成剧本”后显示）");
         this.notify();
     }
 }
@@ -116,9 +122,9 @@ function setup(node) {
     }
     const panel = new Panel(node);
     panels.set(node.id, panel);
-    const dom = node.addDOMWidget("director", "yh3director", panel.root, { serialize: false, hideOnZoom: false, getMinHeight: () => 250 });
+    const dom = node.addDOMWidget("director", "yh3director", panel.root, { serialize: false, hideOnZoom: false, getMinHeight: () => 320 });
     dom.serialize = false;
-    dom.computeLayoutSize = () => ({ minHeight: 250, minWidth: 460 });
+    dom.computeLayoutSize = () => ({ minHeight: 320, minWidth: 460 });
     node.yh3Panel = panel;
     node.setSize([Math.max(node.size[0], 520), Math.max(node.size[1], 620)]);
     panel.refresh();
@@ -134,6 +140,10 @@ api.addEventListener("yogurt_h3.director", ({ detail }) => {
     panel.states[detail.shot] = detail.stage;
     const index = readProject(panel.node).shots.findIndex(s => s.id === detail.shot);
     panel.say(`第 ${index + 1} 镜：${STAGES[detail.stage] || detail.stage}`);
+    if (detail.prompt != null) {
+        storePrompts(panel.node, { [detail.shot]: detail.prompt });
+        if (panel.editor?.root?.isConnected) panel.editor.showPrompts();
+    }
     panel.refresh();
 });
 
@@ -181,6 +191,7 @@ app.registerExtension({
                     info.timeline.forEach(entry => { panel.states[entry.id] = "complete"; });
                     panel.say(`完成：${info.video.filename}（${info.size[0]}×${info.size[1]}，${secs(info.timeline.reduce((s, e) => s + e.frames, 0))}）`);
                     panel.refresh();
+                    if (panel.editor?.root?.isConnected) panel.editor.showPrompts();
                 }
             }
             return result;

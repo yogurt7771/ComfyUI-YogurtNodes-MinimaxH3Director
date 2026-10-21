@@ -469,8 +469,13 @@ class Editor {
         }, counts[id] ? `${label} ${counts[id]}` : label)));
     }
 
+    /** Rewritten prompts arrived: redraw the panes that show them, unless the user is editing in the side pane. */
+    showPrompts() {
+        if ((this.tab === "story" || this.tab === "shot") && !this.pane.contains(document.activeElement)) this.renderInspector();
+    }
+
     renderInspector() {
-        const builders = { story: this.storyPane, shot: this.shotPane, keys: this.keysPane, refs: this.refsPane, repaint: this.repaintPane, detail: this.detailPane, project: this.projectPane };
+        const builders ={ story: this.storyPane, shot: this.shotPane, keys: this.keysPane, refs: this.refsPane, repaint: this.repaintPane, detail: this.detailPane, project: this.projectPane };
         this.pane.replaceChildren(...[builders[this.tab].call(this)].flat(3).filter(child => child != null && child !== false));
         this.renderTabs();
     }

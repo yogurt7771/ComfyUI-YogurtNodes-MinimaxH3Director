@@ -7,7 +7,7 @@ export const OVERLAPS = [0, 5, 22, 39, 56];
 export const NODE = "YogurtH3Director";
 export const STAGES = {
     encoding: "编码条件", sampling: "生成中", repainting: "重绘中", upscaling: "放大中", refining: "二采中",
-    decoding: "解码中", detailing: "精修中", rewriting: "改写提示词", complete: "完成",
+    decoding: "解码中", detailing: "精修中", rewriting: "改写提示词", rewritten: "已改写", complete: "完成",
 };
 
 export const align = n => { n = Math.max(5, Math.round(n)); while (n % 17 !== 5) n++; return n; };
@@ -251,7 +251,11 @@ const css = `
 .yh3-panel header { display:flex; align-items:center; gap:8px; }
 .yh3-panel header strong { font:600 14px "Bahnschrift","Segoe UI",sans-serif; letter-spacing:.03em; }
 .yh3-panel .status { min-height:16px; color:var(--yh3-dim); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.yh3-panel .strip { flex:none; }
 .yh3-panel textarea { min-height:54px; flex:1; }
+.yh3-panel .result { flex:1.3; min-height:54px; overflow:auto; white-space:pre-wrap; font:11px/1.5 Consolas,monospace; color:var(--yh3-dim);
+  background:#12151a; border:1px solid var(--yh3-line); border-radius:6px; padding:5px 7px; }
+.yh3-panel .result b { color:var(--yh3-ink); font-family:"Segoe UI",sans-serif; }
 .yh3-modal { position:fixed; inset:0; z-index:10000; background:#000a; display:flex; }
 .yh3-modal .frame { margin:auto; width:min(1680px,97vw); height:min(1000px,95vh); background:var(--yh3-bg); border:1px solid var(--yh3-line); border-radius:12px;
   display:grid; grid-template-rows:auto 1fr auto; overflow:hidden; box-shadow:0 20px 70px #000c; }
