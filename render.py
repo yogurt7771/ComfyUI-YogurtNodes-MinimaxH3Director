@@ -146,7 +146,7 @@ class Render:
         lock = [identity(self.project["soundtrack"]), window.start - window.head] if self.audio_mode(shot) == "soundtrack" else None
         return {"kind": shot["kind"], "prompt": shot["prompt"], "seed": self.seed(shot["id"], shot["seed"]), "head": window.head, "gen": window.gen,
                 "keyframes": [[window.frame(k["at"]), identity(k["media"]), k["fit"]] for k in shot["keyframes"]],
-                "refs": [[[identity(m["media"]), m["fit"]] for m in refs["images"]], [[identity(v["media"]), v["audio"]] for v in refs["videos"]],
+                "refs": [[[identity(m["media"]), m["fit"]] for m in refs["images"]], [[identity(v["media"]), v["audio"], v["start"]] for v in refs["videos"]],
                          [identity(m) for m in refs["audios"]]],
                 "source": source and [identity(source["media"]), source["start"], source["regen"], source["strength"]],
                 "audio": [self.audio_mode(shot), lock], "ref_strength": shot["ref_strength"]}
