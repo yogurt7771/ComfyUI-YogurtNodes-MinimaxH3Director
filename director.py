@@ -29,6 +29,20 @@ def _media(project):
     return [m for m in shot_media + [project["soundtrack"]] if m is not None]
 
 
+def _upscaler_inputs(prefix, name):
+    """How a 二采 pass lifts its input to its canvas, and the latent upscaler weights it uses."""
+    return [
+        io.Combo.Input(f"{prefix}_upscaler", options=list(REFINE_UPSCALERS), default=SETTINGS[f"{prefix}_upscaler"],
+                       tooltip=f"{name}放大画面的方式。\n"
+                               "h3_latent：H3 latent 放大模型直接放大视频 latent，不经过 VAE（快；源视频局部重绘镜头仍走像素）。\n"
+                               "lanczos：VAE 解码 → Lanczos 放大 → VAE 编码。\n"
+                               "model：VAE 解码 → 接入的 upscale_model 放大 → VAE 编码。"),
+        io.Combo.Input(f"{prefix}_latent_model", options=latent_upscale.choices(), default=SETTINGS[f"{prefix}_latent_model"],
+                       tooltip=f"{name}用 h3_latent 时的放大权重（models/latent_upscale_models）。默认权重缺失时，首次使用会从 Hugging Face "
+                               "下载约 690 MB（LBH-123-AI/Minimax_h3_latent_Upscaler，校验 SHA-256；可用 HF_ENDPOINT 换镜像）。"),
+    ]
+
+
 def _input_previews(project, media, node_id):
     """Small pictures of the connected image / video / mask sockets the project uses, saved to temp for the editor."""
     folder = os.path.join(folder_paths.get_temp_directory(), "yogurt_h3", "inputs")
@@ -90,6 +104,7 @@ class YogurtH3Director(io.ComfyNode):
                                tooltip="两段式的放大倍数：首采画幅 = 两段式画幅 ÷ two_pass_scale。两段式画幅是成片尺寸，同开低噪重绘时再除以 rerender_scale。"),
                 io.Int.Input("two_pass_steps", default=SETTINGS["two_pass_steps"], min=1, max=200,
                              tooltip="调度表最后几步在两段式画幅上跑（例如 steps 8、这里 2 = 首采 6 步 + 放大后 2 步）。"),
+                *_upscaler_inputs("two_pass", "两段式"),
                 io.Boolean.Input("rerender", default=SETTINGS["rerender"],
                                  tooltip="低噪重绘：放大 rerender_scale 倍到成片尺寸，从 rerender_denoise 的噪声再采 rerender_steps 步，音轨锁定。\n"
                                          "单开时接在完整跑完的首采后；和两段式同开时接在两段式之后。"),
@@ -98,14 +113,7 @@ class YogurtH3Director(io.ComfyNode):
                 io.Int.Input("rerender_steps", default=SETTINGS["rerender_steps"], min=1, max=200, tooltip="低噪重绘的步数。"),
                 io.Float.Input("rerender_denoise", default=SETTINGS["rerender_denoise"], min=0.05, max=1.0, step=0.05,
                                tooltip="低噪重绘从多大的噪声开始（1 = 纯噪声），常用 0.25–0.4。"),
-                io.Combo.Input("refine_upscaler", options=list(REFINE_UPSCALERS), default=SETTINGS["refine_upscaler"],
-                               tooltip="两段式和低噪重绘放大画面的方式。\n"
-                                       "h3_latent：H3 latent 放大模型直接放大视频 latent，不经过 VAE（快；源视频局部重绘镜头仍走像素）。\n"
-                                       "lanczos：VAE 解码 → Lanczos 放大 → VAE 编码。\n"
-                                       "model：VAE 解码 → 接入的 upscale_model 放大 → VAE 编码。"),
-                io.Combo.Input("refine_latent_model", options=latent_upscale.choices(), default=SETTINGS["refine_latent_model"],
-                               tooltip="h3_latent 用的放大权重（models/latent_upscale_models）。默认权重缺失时，首次使用会从 Hugging Face "
-                                       "下载约 690 MB（LBH-123-AI/Minimax_h3_latent_Upscaler，校验 SHA-256；可用 HF_ENDPOINT 换镜像）。"),
+                *_upscaler_inputs("rerender", "低噪重绘"),
                 io.Boolean.Input("detail", default=SETTINGS["detail"],
                                  tooltip="局部精修总开关：关掉时跳过所有精修区域。区域在导演台“局部精修”页框选。"),
                 io.Int.Input("detail_steps", default=SETTINGS["detail_steps"], min=1, max=200, tooltip="局部精修步数。"),
@@ -115,7 +123,7 @@ class YogurtH3Director(io.ComfyNode):
                 Rewriter.Input("rewriter", optional=True, tooltip="Yogurt H3 改写模型：工程里打开“自动改写”后，按剧情和分段情况写每一镜的 H3 提示词。"),
                 io.ModelPatch.Input("inpaint_patch", optional=True,
                                     tooltip="MiniMax H3 Fun ControlNet（ModelPatchLoader）：局部重绘时让遮罩区参考周围画面；不接则只用 latent 遮罩。"),
-                io.UpscaleModel.Input("upscale_model", optional=True, tooltip="二采选择“放大模型”时使用。"),
+                io.UpscaleModel.Input("upscale_model", optional=True, tooltip="两段式或低噪重绘的放大方式选 model 时使用。"),
                 io.Sampler.Input("sampler", optional=True, tooltip="自定义采样器（如 Turbo Sampler），替换 sampler_name。"),
                 io.Sigmas.Input("sigmas", optional=True, tooltip="首采噪声表，替换 steps/scheduler；局部重绘按强度截取尾部。"),
                 io.Autogrow.Input("images", optional=True, template=io.Autogrow.TemplatePrefix(

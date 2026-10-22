@@ -40,12 +40,14 @@ SETTINGS = {
     "two_pass": False,
     "two_pass_scale": 2.0,
     "two_pass_steps": 2,
+    "two_pass_upscaler": "h3_latent",
+    "two_pass_latent_model": LATENT_UPSCALER,
     "rerender": False,
     "rerender_scale": 1.0,
     "rerender_steps": 2,
     "rerender_denoise": 0.35,
-    "refine_upscaler": "h3_latent",
-    "refine_latent_model": LATENT_UPSCALER,
+    "rerender_upscaler": "h3_latent",
+    "rerender_latent_model": LATENT_UPSCALER,
     "detail": True,
     "detail_steps": 8,
 }
@@ -192,6 +194,12 @@ def _shot(raw, index, global_refs):
     }
 
 
+def _upscaler(settings, prefix):
+    upscaler = settings[f"{prefix}_upscaler"]
+    return {"upscaler": upscaler if upscaler in REFINE_UPSCALERS else "lanczos",
+            "latent_model": str(settings[f"{prefix}_latent_model"] or LATENT_UPSCALER)}
+
+
 def load_project(text, settings=None):
     """The editor's project JSON plus the node's render ``settings`` (widget values, see SETTINGS)."""
     try:
@@ -213,12 +221,10 @@ def load_project(text, settings=None):
         "story": str(data.get("story") or ""),
         "rewrite": {"enabled": bool(rewrite["enabled"]), "notes": str(rewrite["notes"] or ""), "seed": _int(rewrite["seed"], 0, 0, 2**31)},
         # 二采 passes, either or both; each lifts the canvas by its own scale and the last one ends at width x height.
-        "refine": {"two_pass": {"scale": _float(s["two_pass_scale"], 2.0, 1.0, 4.0), "steps": _int(s["two_pass_steps"], 2, 1, 200)}
-                   if s["two_pass"] else None,
+        "refine": {"two_pass": {"scale": _float(s["two_pass_scale"], 2.0, 1.0, 4.0), "steps": _int(s["two_pass_steps"], 2, 1, 200),
+                                **_upscaler(s, "two_pass")} if s["two_pass"] else None,
                    "rerender": {"scale": _float(s["rerender_scale"], 1.0, 1.0, 4.0), "steps": _int(s["rerender_steps"], 2, 1, 200),
-                                "denoise": _float(s["rerender_denoise"], 0.35, 0.05, 1.0)} if s["rerender"] else None,
-                   "upscaler": s["refine_upscaler"] if s["refine_upscaler"] in REFINE_UPSCALERS else "lanczos",
-                   "latent_model": str(s["refine_latent_model"] or LATENT_UPSCALER)},
+                                "denoise": _float(s["rerender_denoise"], 0.35, 0.05, 1.0), **_upscaler(s, "rerender")} if s["rerender"] else None},
         "detail": {"steps": _int(s["detail_steps"], 8, 1, 200)},
     }
     project["shots"] = [_shot(raw, i, project["refs"]) for i, raw in enumerate(data.get("shots") or []) if isinstance(raw, dict)]

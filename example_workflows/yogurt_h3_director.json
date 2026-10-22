@@ -645,6 +645,24 @@
           "link": null
         },
         {
+          "localized_name": "two_pass_upscaler",
+          "name": "two_pass_upscaler",
+          "type": "COMBO",
+          "widget": {
+            "name": "two_pass_upscaler"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "two_pass_latent_model",
+          "name": "two_pass_latent_model",
+          "type": "COMBO",
+          "widget": {
+            "name": "two_pass_latent_model"
+          },
+          "link": null
+        },
+        {
           "localized_name": "rerender",
           "name": "rerender",
           "type": "BOOLEAN",
@@ -681,20 +699,20 @@
           "link": null
         },
         {
-          "localized_name": "refine_upscaler",
-          "name": "refine_upscaler",
+          "localized_name": "rerender_upscaler",
+          "name": "rerender_upscaler",
           "type": "COMBO",
           "widget": {
-            "name": "refine_upscaler"
+            "name": "rerender_upscaler"
           },
           "link": null
         },
         {
-          "localized_name": "refine_latent_model",
-          "name": "refine_latent_model",
+          "localized_name": "rerender_latent_model",
+          "name": "rerender_latent_model",
           "type": "COMBO",
           "widget": {
-            "name": "refine_latent_model"
+            "name": "rerender_latent_model"
           },
           "link": null
         },
@@ -745,6 +763,8 @@
         false,
         2.0,
         2,
+        "h3_latent",
+        "minimax_h3_latent_upscaler_3d_conv_v1_fp16.safetensors",
         false,
         1.0,
         2,
@@ -771,12 +791,14 @@
         "two_pass": false,
         "two_pass_scale": 2.0,
         "two_pass_steps": 2,
+        "two_pass_upscaler": "h3_latent",
+        "two_pass_latent_model": "minimax_h3_latent_upscaler_3d_conv_v1_fp16.safetensors",
         "rerender": false,
         "rerender_scale": 1.0,
         "rerender_steps": 2,
         "rerender_denoise": 0.35,
-        "refine_upscaler": "h3_latent",
-        "refine_latent_model": "minimax_h3_latent_upscaler_3d_conv_v1_fp16.safetensors",
+        "rerender_upscaler": "h3_latent",
+        "rerender_latent_model": "minimax_h3_latent_upscaler_3d_conv_v1_fp16.safetensors",
         "detail": true,
         "detail_steps": 3
       }

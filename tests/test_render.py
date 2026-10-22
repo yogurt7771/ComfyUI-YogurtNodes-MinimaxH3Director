@@ -48,7 +48,7 @@ class RenderTests(unittest.TestCase):
 
     def run_project(self, data, settings=None, media=None, **kwargs):
         # The real latent upscaler stays out of unit tests; the h3_latent tests bring a tiny one.
-        spec = director.project.load_project(json.dumps(data), {"width": 128, "height": 64, "refine_upscaler": "lanczos", **(settings or {})})
+        spec = director.project.load_project(json.dumps(data), {"width": 128, "height": 64, "two_pass_upscaler": "lanczos", "rerender_upscaler": "lanczos", **(settings or {})})
         job = render.Render("7", {}, spec, models(director, **kwargs), media or director.media.Media(), [11, 6, 1.0, "euler", "simple"])
         self.fake.calls.clear()
         video, saved = job.run("test/out")
@@ -161,7 +161,7 @@ class RenderTests(unittest.TestCase):
         folder_paths.folder_names_and_paths["latent_upscale_models"] = ([str(folder)], {".safetensors"})
         shots = [{"id": "a", "frames": 30, "prompt": "一"}, {"id": "b", "frames": 30, "prompt": "二"}]
         settings = {"two_pass": True, "width": 256, "height": 128, "two_pass_scale": 2.0, "two_pass_steps": 2,
-                    "refine_upscaler": "h3_latent", "refine_latent_model": "tiny.safetensors"}
+                    "two_pass_upscaler": "h3_latent", "two_pass_latent_model": "tiny.safetensors"}
         try:
             job, _ = self.run_project({"shots": shots}, settings)
             base_a, base_b, refine_a, refine_b = self.fake.calls
@@ -172,7 +172,7 @@ class RenderTests(unittest.TestCase):
             # (the stand-in tags it with that step's sigma, 0.5 in [1, .83, .67, .5, 0]).
             self.assertTrue(base_a["last"] and torch.all(refine_a["audio_noise"] == 0.5))
             # A cached draft keeps that noise for a later run that only changes the upscaler.
-            job, _ = self.run_project({"shots": shots}, {**settings, "refine_upscaler": "lanczos"})
+            job, _ = self.run_project({"shots": shots}, {**settings, "two_pass_upscaler": "lanczos"})
             refine_a, refine_b = self.fake.calls
             self.assertTrue(torch.all(refine_a["audio_noise"] == 0.5))
             self.assertEqual(job.m.vae.encoded[0][1:3], (128, 256))
@@ -252,8 +252,8 @@ class RenderTests(unittest.TestCase):
     def test_rerender_at_scale_one_resamples_the_draft_in_place(self):
         shots = [{"id": "a", "frames": 30, "prompt": "一"}]
         # A missing latent upscaler would fail the run if the draft were lifted.
-        job, _ = self.run_project({"shots": shots}, {"rerender": True, "rerender_scale": 1.0, "refine_upscaler": "h3_latent",
-                                                     "refine_latent_model": "missing.safetensors"})
+        job, _ = self.run_project({"shots": shots}, {"rerender": True, "rerender_scale": 1.0, "rerender_upscaler": "h3_latent",
+                                                     "rerender_latent_model": "missing.safetensors"})
         base, again = self.fake.calls
         self.assertEqual((base["shape"][-2:], again["shape"][-2:], again["start"]), ((4, 8), (4, 8), 0.35))
         self.assertEqual(job.m.vae.encoded, [])
@@ -360,8 +360,9 @@ class RenderTests(unittest.TestCase):
                                scheduler="simple", filename_prefix="test/node", project=project,
                                videos={"video_0": InputImpl.VideoFromFile(str(self.root / "clip.mp4"))}, audios={"audio_0": None},
                                width=96, height=64, overlap="22", ref_image_size="match", negative_prompt="", two_pass=False, two_pass_scale=2.0, two_pass_steps=2,
-                               rerender=False, rerender_scale=1.0, rerender_steps=2, rerender_denoise=0.35, refine_upscaler="lanczos",
-                               refine_latent_model="missing.safetensors", detail=True, detail_steps=8)
+                               two_pass_upscaler="lanczos", two_pass_latent_model="missing.safetensors", rerender=False, rerender_scale=1.0,
+                               rerender_steps=2, rerender_denoise=0.35, rerender_upscaler="lanczos", rerender_latent_model="missing.safetensors",
+                               detail=True, detail_steps=8)
         finally:
             node.hidden = saved
         info = out.ui["yogurt_h3"][0]

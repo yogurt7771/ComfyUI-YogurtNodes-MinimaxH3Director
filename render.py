@@ -95,10 +95,10 @@ class Render:
         signature = lambda names: cache.upstream_signature(prompt, node_id, names)
         base = [VERSION, signature(["model", "ref_model", "clip", "vae", "audio_vae", "sampler", "sigmas"]), settings,
                 self.width, self.height, project["overlap"], project["negative_prompt"], project["ref_image_size"]]
-        lift = self.refine and [signature(["refine_model", "upscale_model"]), self.refine["upscaler"], self.refine["latent_model"],
-                                self.refine["upscaler"] == "h3_latent" and latent_upscale.identity(self.refine["latent_model"])]
+        lift = signature(["refine_model", "upscale_model"])
         self.env = {"base": digest(base), "inpaint": signature(["inpaint_patch"]),
-                    "passes": [digest([base, lift, kind, settings, self.canvas[p], self.canvas[p + 1]]) for p, (kind, settings) in enumerate(self.passes)],
+                    "passes": [digest([base, lift, kind, settings, settings["upscaler"] == "h3_latent" and latent_upscale.identity(settings["latent_model"]),
+                                       self.canvas[p], self.canvas[p + 1]]) for p, (kind, settings) in enumerate(self.passes)],
                     "detail": digest([base, signature(["refine_model"]), project["detail"]])}
         self.report = list(report)
         self.final, self.refined, self.conds, self.keyframes, self.detail_conds = {}, {}, {}, {}, {}
@@ -341,11 +341,11 @@ class Render:
         seed = self.seed(shot["id"], shot["seed"], layer["id"], layer["seed"])
         return {"samples": sampling.sample(model, positive, negative, m.cfg, m.sampler, sigmas, masked, seed)}
 
-    def upscale(self, frames, width, height):
+    def upscale(self, frames, width, height, upscaler):
         out = []
         for start in range(0, frames.shape[0], 8):
             chunk = frames[start:start + 8]
-            if self.refine["upscaler"] == "model" and self.m.upscale_model is not None:
+            if upscaler == "model" and self.m.upscale_model is not None:
                 chunk = ImageUpscaleWithModel.execute(self.m.upscale_model, chunk).result[0].float().cpu()
             out.append(fit(chunk, width, height))
         return torch.cat(out)
@@ -377,12 +377,12 @@ class Render:
                 video, audio = sampling.streams(latent)
                 # Scale 1 keeps the canvas; only source edits still go through their pixels.
                 at_size = (w0, h0) == (w1, h1)
-                if self.refine["upscaler"] == "h3_latent" and not self.edits_source(shot) and not at_size:
-                    lift = lift or latent_upscale.load(self.refine["latent_model"])
+                if settings["upscaler"] == "h3_latent" and not self.edits_source(shot) and not at_size:
+                    lift = lift or latent_upscale.load(settings["latent_model"])
                     video = latent_upscale.upscale(lift, video, h1 // 16, w1 // 16)
                 elif self.edits_source(shot) or not at_size:
                     # Source edits are composited with the source pixels, so they always take the pixel path.
-                    frames = self.upscale(_decode(self.m.vae, video), w1, h1)
+                    frames = self.upscale(_decode(self.m.vae, video), w1, h1, settings["upscaler"])
                     if self.edits_source(shot):
                         frames = torch.lerp(self.source_frames(window, w1, h1), frames, self.composite_mask(window, w1, h1)[..., None])
                         pixels = torch.stack([self.repaint_pixels(window, layer, w1, h1) for layer in shot["repaints"]])
