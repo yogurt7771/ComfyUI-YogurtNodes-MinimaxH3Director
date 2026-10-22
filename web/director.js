@@ -185,6 +185,16 @@ app.registerExtension({
         const executed = nodeType.prototype.onExecuted;
         nodeType.prototype.onExecuted = function (message) {
             const result = executed?.apply(this, arguments);
+            const mask = message?.yogurt_h3_mask?.[0];
+            if (mask) {
+                // A 识别预览 run: the tinted mask of one 局部重绘 layer and the English its text target became.
+                this.properties = this.properties || {};
+                this.properties.yh3Masks = { ...(this.properties.yh3Masks || {}), [mask.layer]: mask };
+                this.properties.yh3Targets = { ...(this.properties.yh3Targets || {}), ...mask.targets };
+                changed();
+                const editor = this.yh3Panel?.editor;
+                if (editor?.root?.isConnected && editor.tab === "repaint") editor.renderInspector();
+            }
             const info = message?.yogurt_h3?.[0];
             if (info) {
                 this.properties = this.properties || {};
@@ -192,6 +202,7 @@ app.registerExtension({
                 if (info.prompts && Object.keys(info.prompts).length) storePrompts(this, info.prompts);
                 // Pictures of the connected sockets this run received, for material the editor cannot open itself.
                 this.properties.yh3Inputs = info.inputs || {};
+                this.properties.yh3Targets = { ...(this.properties.yh3Targets || {}), ...(info.targets || {}) };
                 changed();
                 const panel = this.yh3Panel;
                 if (panel) {

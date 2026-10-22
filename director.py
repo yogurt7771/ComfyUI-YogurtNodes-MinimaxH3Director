@@ -14,7 +14,13 @@ from .cache import digest
 from .media import Media
 from .project import DEFAULT_PROJECT, OVERLAPS, REFINE_UPSCALERS, SETTINGS, load_project, plan_windows
 from .render import Models, Render, send_event
-from .rewrite import Rewriter, rewrite_project
+from .rewrite import Rewriter, english_targets, rewrite_project
+
+# Model inputs are evaluated only when the run needs them: a mask preview loads SAM 3, the VAE and the rewrite model
+# (for translating targets), never the H3 models.
+LAZY_INPUTS = ("model", "clip", "vae", "audio_vae", "ref_model", "refine_model", "rewriter", "inpaint_patch", "upscale_model",
+               "sampler", "sigmas", "sam3", "sam3_clip")
+PREVIEW_INPUTS = ("vae", "rewriter", "sam3", "sam3_clip")
 
 
 def _media(project):
@@ -23,7 +29,7 @@ def _media(project):
     for shot in project["shots"]:
         refs = shot["refs"]
         shot_media += [k["media"] for k in shot["keyframes"]] + [m["media"] for m in refs["images"]] + refs["audios"]
-        shot_media += [v["media"] for v in refs["videos"]] + [layer["mask"] for layer in shot["repaints"]]
+        shot_media += [v["media"] for v in refs["videos"]] + [layer["mask"] for layer in shot["repaints"] + shot["details"]]
         if shot["source"]:
             shot_media.append(shot["source"]["media"])
     return [m for m in shot_media + [project["soundtrack"]] if m is not None]
@@ -41,6 +47,22 @@ def _upscaler_inputs(prefix, name):
                        tooltip=f"{name}用 h3_latent 时的放大权重（models/latent_upscale_models）。默认权重缺失时，首次使用会从 Hugging Face "
                                "下载约 690 MB（LBH-123-AI/Minimax_h3_latent_Upscaler，校验 SHA-256；可用 HF_ENDPOINT 换镜像）。"),
     ]
+
+
+def _translate(project, rewriter, report):
+    """SAM 3 reads English phrases: other text targets get one from the rewrite model. Returns {text: English}."""
+    targets = [layer["target"] for shot in project["shots"] for layer in shot["repaints"] + shot["details"] if layer["target"]]
+    foreign = sorted({target["text"] for target in targets if not target["text"].isascii()})
+    if not foreign:
+        return {}
+    if rewriter is None:
+        report.append(f"识别目标 {'、'.join(foreign)} 不是英文：SAM 3 只认英文短语，接上改写模型会自动翻译，或直接写英文")
+        return {}
+    english = english_targets(foreign, rewriter)
+    for target in targets:
+        if target["text"] in english:
+            target["english"] = english[target["text"]]
+    return english
 
 
 def _input_previews(project, media, node_id):
@@ -75,12 +97,12 @@ class YogurtH3Director(io.ComfyNode):
             node_id="YogurtH3Director",
             display_name="Yogurt H3 导演台",
             category="Yogurt/MiniMax H3",
-            description="可视化时间线导演台：文生、首尾帧、参考生成、源视频改写、局部重绘、二采放大与局部精修，直接输出带声音的成片。",
+            description="可视化时间线导演台：文生、首尾帧、参考生成、源视频改写、局部重绘（可文字识别、放大贴回）与二采放大，直接输出带声音的成片。",
             inputs=[
-                io.Model.Input("model", tooltip="MiniMax H3 fl2va 模型：文生、首尾帧和局部重绘。"),
-                io.Clip.Input("clip", tooltip="CLIPLoader，type 选 minimax（Qwen3-VL）。"),
-                io.Vae.Input("vae", tooltip="MiniMax H3 视频 VAE。"),
-                io.Vae.Input("audio_vae", tooltip="MiniMax H3 音频 VAE。"),
+                io.Model.Input("model", lazy=True, tooltip="MiniMax H3 fl2va 模型：文生、首尾帧和局部重绘。"),
+                io.Clip.Input("clip", lazy=True, tooltip="CLIPLoader，type 选 minimax（Qwen3-VL）。"),
+                io.Vae.Input("vae", lazy=True, tooltip="MiniMax H3 视频 VAE。"),
+                io.Vae.Input("audio_vae", lazy=True, tooltip="MiniMax H3 音频 VAE。"),
                 io.Int.Input("seed", default=0, min=0, max=0xFFFFFFFFFFFFFFFF, control_after_generate=io.ControlAfterGenerate.fixed,
                              tooltip="全片种子；每个镜头另有种子偏移。固定种子才能复用已生成的镜头。"),
                 io.Int.Input("steps", default=25, min=1, max=200, tooltip="首采与局部重绘步数；接了 sigmas 时忽略。"),
@@ -115,17 +137,21 @@ class YogurtH3Director(io.ComfyNode):
                                tooltip="低噪重绘从多大的噪声开始（1 = 纯噪声），常用 0.25–0.4。"),
                 *_upscaler_inputs("rerender", "低噪重绘"),
                 io.Boolean.Input("detail", default=SETTINGS["detail"],
-                                 tooltip="局部精修总开关：关掉时跳过所有精修区域。区域在导演台“局部精修”页框选。"),
-                io.Int.Input("detail_steps", default=SETTINGS["detail_steps"], min=1, max=200, tooltip="局部精修步数。"),
-                io.Model.Input("ref_model", optional=True,
+                                 tooltip="放大贴回总开关：关掉时跳过所有打开“放大贴回”的局部重绘层。"),
+                io.Int.Input("detail_steps", default=SETTINGS["detail_steps"], min=1, max=200, tooltip="放大贴回的局部重绘层的采样步数。"),
+                io.Model.Input("ref_model", optional=True, lazy=True,
                                tooltip="MiniMax H3 ref2va 模型：带参考素材或改写源视频的镜头使用它；不接则用 model。"),
-                io.Model.Input("refine_model", optional=True, tooltip="二采与局部精修使用的模型；不接则沿用镜头的模型。"),
-                Rewriter.Input("rewriter", optional=True, tooltip="Yogurt H3 改写模型：工程里打开“自动改写”后，按剧情和分段情况写每一镜的 H3 提示词。"),
-                io.ModelPatch.Input("inpaint_patch", optional=True,
+                io.Model.Input("refine_model", optional=True, lazy=True, tooltip="二采与放大贴回使用的模型；不接则沿用镜头的模型。"),
+                Rewriter.Input("rewriter", optional=True, lazy=True,
+                               tooltip="Yogurt H3 改写模型：工程里打开“自动改写”后，按剧情和分段情况写每一镜的 H3 提示词；也把中文识别目标翻成英文。"),
+                io.ModelPatch.Input("inpaint_patch", optional=True, lazy=True,
                                     tooltip="MiniMax H3 Fun ControlNet（ModelPatchLoader）：局部重绘时让遮罩区参考周围画面；不接则只用 latent 遮罩。"),
-                io.UpscaleModel.Input("upscale_model", optional=True, tooltip="两段式或低噪重绘的放大方式选 model 时使用。"),
-                io.Sampler.Input("sampler", optional=True, tooltip="自定义采样器（如 Turbo Sampler），替换 sampler_name。"),
-                io.Sigmas.Input("sigmas", optional=True, tooltip="首采噪声表，替换 steps/scheduler；局部重绘按强度截取尾部。"),
+                io.UpscaleModel.Input("upscale_model", optional=True, lazy=True, tooltip="两段式或低噪重绘的放大方式选 model 时使用。"),
+                io.Sampler.Input("sampler", optional=True, lazy=True, tooltip="自定义采样器（如 Turbo Sampler），替换 sampler_name。"),
+                io.Sigmas.Input("sigmas", optional=True, lazy=True, tooltip="首采噪声表，替换 steps/scheduler；局部重绘按强度截取尾部。"),
+                io.Model.Input("sam3", optional=True, lazy=True,
+                               tooltip="SAM 3 模型（CheckpointLoaderSimple 加载 sam3.1_multiplex_fp16.safetensors 的 MODEL）：局部重绘“文字识别”遮罩用它。"),
+                io.Clip.Input("sam3_clip", optional=True, lazy=True, tooltip="同一个 SAM 3 检查点的 CLIP（它的文字编码器）。"),
                 io.Autogrow.Input("images", optional=True, template=io.Autogrow.TemplatePrefix(
                     input=io.Image.Input("image", tooltip="编辑器里可选作关键帧、参考图或参考视频（帧序列按 24fps）。"),
                     prefix="image_", min=0, max=16)),
@@ -145,6 +171,15 @@ class YogurtH3Director(io.ComfyNode):
         )
 
     @classmethod
+    def check_lazy_status(cls, project, **inputs):
+        spec = load_project(project, inputs)
+        names = PREVIEW_INPUTS if spec["preview"] else LAZY_INPUTS
+        if not any(layer["target"] for shot in spec["shots"] for layer in shot["repaints"] + shot["details"]):
+            names = [name for name in names if name not in ("sam3", "sam3_clip")]
+        # A connected input not evaluated yet arrives as None.
+        return [name for name in names if name in inputs and inputs[name] is None]
+
+    @classmethod
     def fingerprint_inputs(cls, project, **kwargs):
         # Re-run when an uploaded file is replaced in place under the same name.
         try:
@@ -157,11 +192,12 @@ class YogurtH3Director(io.ComfyNode):
     @classmethod
     def execute(cls, model, clip, vae, audio_vae, seed, steps, cfg, sampler_name, scheduler, filename_prefix, project,
                 ref_model=None, refine_model=None, rewriter=None, inpaint_patch=None, upscale_model=None, sampler=None,
-                sigmas=None, images=None, masks=None, videos=None, audios=None, **settings) -> io.NodeOutput:
+                sigmas=None, sam3=None, sam3_clip=None, images=None, masks=None, videos=None, audios=None, **settings) -> io.NodeOutput:
         spec = load_project(project, settings)
         media = Media(images, masks, videos, audios)
         prompts, report = {}, []
-        if spec["rewrite"]["enabled"]:
+        targets = _translate(spec, rewriter, report)
+        if spec["rewrite"]["enabled"] and not spec["preview"]:
             if rewriter is None:
                 raise ValueError("工程打开了自动改写提示词，请把“Yogurt H3 改写模型”连接到导演台的 rewriter。")
             node_id = cls.hidden.unique_id
@@ -169,12 +205,14 @@ class YogurtH3Director(io.ComfyNode):
             spec, prompts, report = rewrite_project(spec, rewriter, media,
                                                     lambda index, stage, prompt=None: send_event(node_id, windows[index].shot["id"], stage, prompt))
         models = Models(model, clip, vae, audio_vae, ref_model, refine_model, inpaint_patch, upscale_model,
-                        sampler or comfy.samplers.sampler_object(sampler_name), sigmas, seed, steps, cfg, scheduler)
+                        sampler or comfy.samplers.sampler_object(sampler_name), sigmas, seed, steps, cfg, scheduler, sam3, sam3_clip)
         render = Render(cls.hidden.unique_id, cls.hidden.prompt, spec, models, media,
                         [seed, steps, cfg, sampler_name, scheduler], report)
+        if spec["preview"]:
+            return io.NodeOutput(None, ui={"yogurt_h3_mask": [{**render.preview(spec["preview"]["layer"]), "targets": targets}]})
         video, saved = render.run(filename_prefix)
         timeline = [{"id": w.shot["id"], "start": w.start, "frames": w.keep, "head": w.head, "gen": w.gen} for w in render.windows]
         return io.NodeOutput(video, ui={"images": [saved], "animated": (True,),
                                         "yogurt_h3": [{"timeline": timeline, "report": render.report, "video": saved, "prompts": prompts,
-                                                       "inputs": _input_previews(spec, media, cls.hidden.unique_id),
+                                                       "inputs": _input_previews(spec, media, cls.hidden.unique_id), "targets": targets,
                                                        "size": [render.out_w, render.out_h]}]})

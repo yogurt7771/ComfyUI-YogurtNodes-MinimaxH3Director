@@ -6,7 +6,7 @@ export const FPS = 24;
 export const NODE = "YogurtH3Director";
 export const STAGES = {
     encoding: "编码条件", sampling: "生成中", repainting: "重绘中", upscaling: "放大中", refining: "二采中", rerendering: "低噪重绘中",
-    decoding: "解码中", detailing: "精修中", rewriting: "改写提示词", rewritten: "已改写", complete: "完成",
+    segmenting: "识别遮罩", decoding: "解码中", detailing: "放大贴回中", rewriting: "改写提示词", rewritten: "已改写", complete: "完成",
 };
 
 export const align = n => { n = Math.max(5, Math.round(n)); while (n % 17 !== 5) n++; return n; };
@@ -23,7 +23,7 @@ export function newShot(kind = "generate") {
         id: uid(), kind, frames: 121, prompt: "", continue: kind === "generate", seed: 0, keyframes: [],
         refs: { images: [], videos: [], audios: [] },
         source: kind === "source" ? { media: null, start: 0, regen: false, strength: 1, ...SHARED } : null,
-        audio: kind === "source" ? "source" : "generate", repaints: [], details: [], refine: true, rewrite: true,
+        audio: kind === "source" ? "source" : "generate", repaints: [], refine: true, rewrite: true,
         inherit_refs: true, inherit_prompt: true, ref_strength: 1,
     };
 }
@@ -40,13 +40,33 @@ const refsOf = refs => ({ audios: [], ...refs,
     images: (refs?.images || []).map(m => (m.media ? { fit: "auto", ...SHARED, ...m } : { media: m, fit: "auto", ...SHARED })),
     videos: (refs?.videos || []).map(v => ({ audio: false, start: 0, ...SHARED, ...v })) });
 
+/**
+ * A 局部重绘 layer keeps every mask source's settings, so switching source loses nothing: the painted mask, the masks
+ * socket, the SAM 3 text target and the box (fixed, or framing a face). ``crop`` pastes it back after 二采.
+ */
+const LAYER = { enabled: true, source: "paint", mask: null, input: "", target: "", threshold: 0.5, objects: 4, box: [0.3, 0.15, 0.4, 0.5],
+    detector: "face_yolov8m.pt", crop: false, megapixels: 0.5, start: 0, end: -1, strength: 1, prompt: "", grow: 8, feather: 8, seed: 0 };
+export const newLayer = () => ({ ...clone(LAYER), id: uid() });
+
+function layerOf(layer) {
+    // A connected mask used to be stored as {input, file} in place of the painted one.
+    const socket = layer.mask?.input ? { source: layer.source || "input", input: layer.mask.input, mask: layer.mask.file || null } : {};
+    return { ...clone(LAYER), ...layer, ...socket };
+}
+
+/** A former 局部精修 region: a 放大贴回 layer on its fixed or face-following box. */
+function detailLayer({ follow, denoise, ...item }) {
+    return layerOf({ ...item, source: follow === "face" ? "face" : "box", crop: true, strength: denoise ?? 0.4 });
+}
+
 export function normalize(project) {
     const base = newProject();
     const out = { ...base, ...project, rewrite: { ...base.rewrite, ...(project?.rewrite || {}) }, refs: refsOf(project?.refs) };
-    out.shots = (project?.shots || []).map(shot => {
+    out.shots = (project?.shots || []).map(({ details = [], ...shot }) => {
         const fresh = newShot(shot.kind === "source" ? "source" : "generate");
         return { ...fresh, ...shot, refs: refsOf(shot.refs), keyframes: (shot.keyframes || []).map(k => ({ fit: "auto", ...SHARED, ...k })),
-            source: shot.kind === "source" ? { ...fresh.source, ...(shot.source || {}) } : null };
+            source: shot.kind === "source" ? { ...fresh.source, ...(shot.source || {}) } : null,
+            repaints: [...(shot.repaints || []).map(layerOf), ...details.map(detailLayer)] };
     });
     if (!out.shots.length) out.shots = [newShot()];
     return out;
@@ -245,7 +265,6 @@ export function features(shot, project) {
     const refs = refCount(effectiveRefs(project, shot));
     if (refs) marks.push(`参考${refs}`);
     if (shot.repaints.length) marks.push(`重绘${shot.repaints.length}`);
-    if (shot.details.length) marks.push(`精修${shot.details.length}`);
     return marks;
 }
 
@@ -347,6 +366,7 @@ const css = `
 .yh3-modal .track .marks i { position:absolute; bottom:0; height:6px; border-radius:2px; }
 .yh3-modal .track .playhead { position:absolute; top:-18px; bottom:0; width:2px; background:#ff5a5a; pointer-events:none; }
 .yh3-modal .note { padding:8px; border-radius:6px; background:#22303f; color:#cfe0ff; }
+.yh3-modal img.maskpreview { width:100%; border-radius:6px; background:#000; }
 .yh3-modal .warn { padding:8px; border-radius:6px; background:#3d2522; color:#ffd0c8; }
 .yh3-modal .report { white-space:pre-wrap; font:11px/1.5 Consolas,monospace; color:var(--yh3-dim); max-height:240px; overflow:auto; }
 `;

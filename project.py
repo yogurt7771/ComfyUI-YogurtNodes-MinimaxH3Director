@@ -20,6 +20,9 @@ REFINE_UPSCALERS = ("h3_latent", "lanczos", "model")
 # How an image meets the canvas; "auto" is the native H3 rule (references keep their aspect, the first keyframe
 # stretches, later keyframes cover-crop).
 FITS = ("auto", "crop", "pad", "stretch")
+# Where a 局部重绘 layer's mask comes from: painted in the editor, a masks socket, a SAM 3 text target, a followed
+# face or a fixed box.
+MASK_SOURCES = ("paint", "input", "text", "face", "box")
 
 DEFAULT_PROJECT = {
     "version": 1,
@@ -148,29 +151,15 @@ def _shot(raw, index, global_refs):
     for item in raw.get("keyframes") or []:
         if isinstance(item, dict) and media(item.get("media")):
             keyframes.append({"at": _int(item.get("at"), 0, -1, 10**6), "media": media(item["media"]), "fit": _fit(item.get("fit")), **_privacy(item)})
-    repaints = []
-    for j, item in enumerate(raw.get("repaints") or []):
-        if not isinstance(item, dict) or media(item.get("mask")) is None or item.get("enabled") is False:
-            continue
-        repaints.append({"id": str(item.get("id") or f"{shot_id}-r{j}"), "mask": media(item["mask"]), "start": _int(item.get("start"), 0, 0, 10**6),
-                         "end": _int(item.get("end"), -1, -1, 10**6), "strength": _float(item.get("strength"), 1.0, 0.05, 1.0),
-                         "prompt": str(item.get("prompt") or ""), "grow": _int(item.get("grow"), 8, 0, 256),
-                         "feather": _int(item.get("feather"), 8, 0, 256), "seed": _int(item.get("seed"), 0, 0, 2**31)})
-    details = []
-    for j, item in enumerate(raw.get("details") or []):
-        if not isinstance(item, dict) or item.get("enabled") is False:
-            continue
-        box = item.get("box")
-        if not (isinstance(box, (list, tuple)) and len(box) == 4):
-            continue
-        x, y, w, h = (_float(v, 0.0, 0.0, 1.0) for v in box)
-        if w < 0.01 or h < 0.01:
-            continue
-        details.append({"id": str(item.get("id") or f"{shot_id}-d{j}"), "box": [x, y, min(w, 1.0 - x), min(h, 1.0 - y)], "follow": "face" if item.get("follow") == "face" else "none",
-                        "detector": str(item.get("detector") or "face_yolov8m.pt"),
-                        "start": _int(item.get("start"), 0, 0, 10**6), "end": _int(item.get("end"), -1, -1, 10**6),
-                        "prompt": str(item.get("prompt") or ""), "denoise": _float(item.get("denoise"), 0.4, 0.05, 1.0),
-                        "megapixels": _float(item.get("megapixels"), 0.5, 0.1, 1.0), "seed": _int(item.get("seed"), 0, 0, 2**31)})
+    layers = [_layer(item, str(item.get("id") or f"{shot_id}-r{j}"), False) for j, item in enumerate(raw.get("repaints") or [])
+              if isinstance(item, dict) and item.get("enabled") is not False]
+    layers += [_layer(item, str(item.get("id") or f"{shot_id}-d{j}"), True) for j, item in enumerate(raw.get("details") or [])
+               if isinstance(item, dict) and item.get("enabled") is not False]
+    # Numbered as the editor lists them: its layers, then former 局部精修 regions.
+    for number, layer in enumerate(layers, 1):
+        if layer is not None:
+            layer["number"] = number
+    layers = [layer for layer in layers if layer is not None]
     return {
         "id": shot_id,
         "kind": kind,
@@ -187,8 +176,9 @@ def _shot(raw, index, global_refs):
         "ref_strength": _float(raw.get("ref_strength"), 1.0, 0.1, 1.0),
         "source": source,
         "audio": audio,
-        "repaints": repaints,
-        "details": details,
+        # 局部重绘 layers: in place on the draft before 二采, or cropped, enlarged and pasted back after it.
+        "repaints": [layer for layer in layers if not layer["crop"]],
+        "details": [layer for layer in layers if layer["crop"]],
         "refine": bool(raw.get("refine", True)),
         "rewrite": bool(raw.get("rewrite", True)),
     }
@@ -198,6 +188,47 @@ def _upscaler(settings, prefix):
     upscaler = settings[f"{prefix}_upscaler"]
     return {"upscaler": upscaler if upscaler in REFINE_UPSCALERS else "lanczos",
             "latent_model": str(settings[f"{prefix}_latent_model"] or LATENT_UPSCALER)}
+
+
+def _box(value):
+    if not (isinstance(value, (list, tuple)) and len(value) == 4):
+        return None
+    x, y, w, h = (_float(v, 0.0, 0.0, 1.0) for v in value)
+    return [x, y, min(w, 1.0 - x), min(h, 1.0 - y)] if w >= 0.01 and h >= 0.01 else None
+
+
+def _target(raw):
+    """SAM 3 text target: comma-separated phrases (``name:N`` keeps up to N of that kind), score threshold, object cap."""
+    text = str(raw.get("target") or "").strip()
+    if not text:
+        return None
+    return {"text": text, "threshold": _float(raw.get("threshold"), 0.5, 0.05, 1.0), "objects": _int(raw.get("objects"), 4, 0, 64)}
+
+
+def _layer(raw, layer_id, legacy_detail):
+    """A 局部重绘 layer, or None when its mask source has nothing to use. ``legacy_detail`` reads a former 局部精修
+    region: a 放大贴回 layer on a fixed or face-following box."""
+    painted = raw.get("mask") if isinstance(raw.get("mask"), dict) else {}
+    if legacy_detail:
+        source = "face" if raw.get("follow") == "face" else "box"
+    else:
+        source = raw.get("source") if raw.get("source") in MASK_SOURCES else ("input" if painted.get("input") else "paint")
+    layer = {"id": layer_id, "source": source, "mask": None, "target": None, "box": None,
+             "detector": str(raw.get("detector") or "face_yolov8m.pt"),
+             "start": _int(raw.get("start"), 0, 0, 10**6), "end": _int(raw.get("end"), -1, -1, 10**6),
+             "strength": _float(raw.get("denoise" if legacy_detail else "strength"), 0.4 if legacy_detail else 1.0, 0.05, 1.0),
+             "prompt": str(raw.get("prompt") or ""), "grow": _int(raw.get("grow"), 8, 0, 256),
+             "feather": _int(raw.get("feather"), 8, 0, 256), "seed": _int(raw.get("seed"), 0, 0, 2**31),
+             "crop": bool(raw.get("crop", legacy_detail)), "megapixels": _float(raw.get("megapixels"), 0.5, 0.1, 1.0)}
+    if source == "paint":
+        layer["mask"] = media(painted)
+    elif source == "input":
+        layer["mask"] = media({"input": raw.get("input") or painted.get("input")})
+    elif source == "text":
+        layer["target"] = _target(raw)
+    else:
+        layer["box"] = _box(raw.get("box"))
+    return layer if layer["mask"] or layer["target"] or layer["box"] else None
 
 
 def load_project(text, settings=None):
@@ -231,6 +262,9 @@ def load_project(text, settings=None):
     if not s["detail"]:
         for shot in project["shots"]:
             shot["details"] = []
+    # The editor's 预览 runs one layer's mask instead of the film.
+    preview = data.get("mask_preview")
+    project["preview"] = {"layer": str(preview["layer"])} if isinstance(preview, dict) and preview.get("layer") else None
     if not project["shots"]:
         raise ValueError("导演台里还没有镜头：在时间线上添加至少一个镜头。")
     if any(s["audio"] == "soundtrack" for s in project["shots"]) and project["soundtrack"] is None:

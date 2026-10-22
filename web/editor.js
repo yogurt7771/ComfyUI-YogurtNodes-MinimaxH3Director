@@ -3,7 +3,7 @@ import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
 import {
     FPS, SHARED, STAGES, changed, clamp, clone, effectiveRefs, features, graphInputs, h, inputPreview, isAudio, isVideo, mediaLabel, mediaUrl, refCount,
-    newShot, pickFile, planWindows, previewRewrite, projectData, readProject, rewritable, rewriterConfig, secs, storePrompts, totalFrames, uid,
+    newLayer, newShot, pickFile, planWindows, previewRewrite, projectData, readProject, rewritable, rewriterConfig, secs, storePrompts, totalFrames, uid,
     upload, widget, writeProject,
 } from "./core.js";
 import { Painter } from "./painter.js";
@@ -14,7 +14,9 @@ const clipTime = frames => {
     return minutes ? `${minutes}:${(seconds - minutes * 60).toFixed(2).padStart(5, "0")}` : `${seconds.toFixed(2)}s`;
 };
 const AUDIO_LABELS = { generate: "模型生成", soundtrack: "配乐音轨（锁定）", source: "源视频原声（锁定）", silent: "静音" };
-const TABS = [["story", "剧本"], ["shot", "镜头"], ["keys", "首尾帧"], ["refs", "参考"], ["repaint", "局部重绘"], ["detail", "局部精修"]];
+const TABS = [["story", "剧本"], ["shot", "镜头"], ["keys", "首尾帧"], ["refs", "参考"], ["repaint", "局部重绘"]];
+const SOURCES = [["paint", "手绘"], ["input", "连线遮罩"], ["text", "文字识别"], ["face", "跟随人脸"], ["box", "固定框"]];
+const boxed = layer => layer.source === "face" || layer.source === "box";
 
 let detectorList = null;
 async function detectors() {
@@ -154,11 +156,11 @@ class Editor {
 
     // ------------------------------------------------------------------ stage
 
-    /** The last render is on the stage only when chosen, or by default where repaints / details are drawn on it. */
+    /** The last render is on the stage only when chosen, or by default where repaint layers are drawn on it. */
     showsResult() {
         if (!this.result?.timeline?.some(e => e.id === this.shot.id)) return false;
         if (this.view) return this.view === "result";
-        return this.shot.kind === "generate" && (this.tab === "repaint" || this.tab === "detail");
+        return this.shot.kind === "generate" && this.tab === "repaint";
     }
 
     /** Storyboard frame of a generated shot: the last keyframe at or before kept frame ``frame``, else the first one. */
@@ -208,7 +210,7 @@ class Editor {
         this.renderTrim();
         this.seek(this.frame);
         this.renderToolbar();
-        this.painter.boxes = this.tab === "detail" ? this.shot.details.map(d => d.box) : [];
+        this.painter.boxes = this.tab === "repaint" ? this.shot.repaints.map(layer => (boxed(layer) ? layer.box : null)) : [];
         this.painter.active = this.boxing;
         this.painter.render();
     }
@@ -416,7 +418,7 @@ class Editor {
             return;
         }
         if (this.boxing >= 0) {
-            bar.append(h("b", {}, `在画面上拖出精修 ${this.boxing + 1} 的区域`), h("span.grow"), h("button", { onclick: () => this.stopTools() }, "取消"));
+            bar.append(h("b", {}, `在画面上拖出重绘 ${this.boxing + 1} 的区域`), h("span.grow"), h("button", { onclick: () => this.stopTools() }, "取消"));
             return;
         }
         if (this.trim) {
@@ -447,8 +449,7 @@ class Editor {
         this.paint = index;
         const layer = this.shot.repaints[index];
         this.fitScreen();
-        const painted = layer.mask?.input ? layer.mask.file : layer.mask;
-        await this.painter.loadMask(painted ? mediaUrl(painted) : null);
+        await this.painter.loadMask(layer.mask ? mediaUrl(layer.mask) : null);
         this.painter.setMode("mask");
         this.renderTabs();
         this.renderInspector();
@@ -457,6 +458,7 @@ class Editor {
 
     async saveMask() {
         const layer = this.shot.repaints[this.paint];
+        layer.source = "paint";
         if (this.painter.dirty) {
             if (!this.painter.hasMask()) {
                 layer.mask = null;
@@ -471,11 +473,11 @@ class Editor {
 
     startBox(index) {
         this.stopTools();
-        this.tab = "detail";
+        this.tab = "repaint";
         this.boxing = index;
         this.painter.setMode("box");
         this.painter.onbox = box => {
-            this.shot.details[index].box = box.map(v => Number(v.toFixed(4)));
+            this.shot.repaints[index].box = box.map(v => Number(v.toFixed(4)));
             this.stopTools();
             this.commit(true);
         };
@@ -546,7 +548,6 @@ class Editor {
         const shot = clone(this.shot);
         shot.id = uid();
         shot.repaints.forEach(layer => { layer.id = uid(); });
-        shot.details.forEach(item => { item.id = uid(); });
         this.project.shots.splice(this.selected + 1, 0, shot);
         this.selected += 1;
         this.commit(true);
@@ -605,8 +606,7 @@ class Editor {
             const a = clamp(start, 0, w.keep - 1), b = end < 0 ? w.keep : clamp(end + 1, a + 1, w.keep);
             marks.append(h("i", { style: { left: `${a * scale}px`, width: `${Math.max(3, (b - a) * scale)}px`, background: color } }));
         };
-        shot.repaints.forEach(layer => span(layer.start, layer.end, "#ff8a2a"));
-        shot.details.forEach(item => span(item.start, item.end, "#7aa7ff"));
+        shot.repaints.forEach(layer => span(layer.start, layer.end, layer.crop ? "#7aa7ff" : "#ff8a2a"));
         shot.keyframes.forEach(k => {
             const at = k.at === -1 ? w.keep - 1 : clamp(k.at, 0, w.keep - 1);
             marks.append(h("i", { style: { left: `${at * scale - 2}px`, width: "5px", height: "9px", background: "#fff", bottom: "-1px" } }));
@@ -644,7 +644,7 @@ class Editor {
 
     renderTabs() {
         const counts = { keys: this.shot.keyframes.length, refs: refCount(effectiveRefs(this.project, this.shot)),
-            repaint: this.shot.repaints.length, detail: this.shot.details.length };
+            repaint: this.shot.repaints.length };
         this.tabs.replaceChildren(...TABS.map(([id, label]) => h(`button${this.tab === id ? ".on" : ""}`, {
             onclick: () => { this.stopTools(); this.tab = id; this.renderTabs(); this.renderInspector(); this.renderStage(); },
         }, counts[id] ? `${label} ${counts[id]}` : label)));
@@ -656,7 +656,7 @@ class Editor {
     }
 
     renderInspector() {
-        const builders = { story: this.storyPane, shot: this.shotPane, keys: this.keysPane, refs: this.refsPane, repaint: this.repaintPane, detail: this.detailPane };
+        const builders = { story: this.storyPane, shot: this.shotPane, keys: this.keysPane, refs: this.refsPane, repaint: this.repaintPane };
         this.pane.replaceChildren(...[builders[this.tab].call(this)].flat(3).filter(child => child != null && child !== false));
         this.renderTabs();
     }
@@ -1005,76 +1005,103 @@ class Editor {
         ];
     }
 
-    repaintPane() {
-        const shot = this.shot;
-        const cards = shot.repaints.map((layer, i) => {
-            const masks = graphInputs(this.node, "mask"), painted = layer.mask?.input ? layer.mask.file : layer.mask, shown = this.preview(layer.mask)?.url;
-            return h(`div.card${this.paint === i ? ".active" : ""}`, {},
-                h("header.row", {}, h("b", {}, `重绘 ${i + 1}`), this.check(layer, "enabled", "启用"), h("span.grow"),
-                    h("button.danger", { onclick: () => { shot.repaints.splice(i, 1); this.commit(true); } }, "删除")),
-                h("div.row", {},
-                    h("div.slot.filled", { style: { width: "84px", aspectRatio: `${this.project.width}/${this.project.height}`, backgroundImage: shown ? `url("${shown}")` : "none" } },
-                        layer.mask ? (layer.mask.input ? h("span.src", {}, mediaLabel(layer.mask)) : "") : "无遮罩"),
-                    h("div.field.grow", {},
-                        h("button.primary", { onclick: () => this.startPaint(i) }, painted ? "编辑遮罩" : "在画面上绘制遮罩"),
-                        masks.length ? h("select", { onchange: e => { layer.mask = e.target.value ? { input: e.target.value, ...(painted && { file: painted }) } : painted || null; this.commit(true); } },
-                            h("option", { value: "" }, painted ? "手绘遮罩" : "使用遮罩输入…"), ...masks.map(m => h("option", { value: m.input, selected: layer.mask?.input === m.input }, m.label))) : null)),
-                this.field("重绘强度（1 = 遮罩内完全重新生成）", this.slider(layer, "strength", 0.05, 1, 0.05)),
-                this.range(layer),
-                this.field("本层提示词（留空沿用镜头提示词）", h("textarea", { rows: 3, value: layer.prompt, oninput: e => { layer.prompt = e.target.value; this.commit(); } })),
-                h("div.row", {}, this.field("遮罩扩展 px", this.number(layer, "grow", { min: 0, max: 256 })),
-                    this.field("边缘羽化 px", this.number(layer, "feather", { min: 0, max: 256 })), this.reseed(layer)));
+    detectorPicker(layer) {
+        const picker = h("select", { onchange: e => { layer.detector = e.target.value; this.commit(); } });
+        detectors().then(list => {
+            picker.replaceChildren(...(list.length ? list : ["face_yolov8m.pt"]).map(name => h("option", { value: name, selected: layer.detector === name }, name)));
         });
-        return [
-            h("div.note", {}, this.shot.kind === "source" && !this.shot.source.regen
-                ? "白色遮罩区域按提示词重新生成，遮罩外保持源视频原样。遮罩画在 24fps 帧上，可设帧范围；多帧遮罩可从“遮罩输入”接入（如 SAM 跟踪结果）。"
-                : "在本镜成片上画遮罩，只重新生成遮罩区域（先运行一次得到成片）。接了 inpaint_patch（Fun ControlNet）时，遮罩区更贴合周围画面；要在遮罩里加入新物体，不接效果更明显。"),
-            ...cards,
-            h("button", { onclick: () => { shot.repaints.push({ id: uid(), enabled: true, mask: null, start: 0, end: -1, strength: 1, prompt: "", grow: 8, feather: 8, seed: 0 }); this.commit(true); this.startPaint(shot.repaints.length - 1); } }, "+ 新建重绘层"),
-        ];
+        return picker;
     }
 
-    detailPane() {
-        const shot = this.shot;
-        const cards = shot.details.map((item, i) => {
-            const picker = h("select");
-            detectors().then(list => {
-                picker.replaceChildren(...(list.length ? list : ["face_yolov8m.pt"]).map(name => h("option", { value: name, selected: item.detector === name }, name)));
+    /** Queue the director alone with a mask preview request: it runs SAM 3 / face detection, never H3. */
+    async previewMask(layer) {
+        try {
+            const { output, workflow } = await app.graphToPrompt();
+            const id = String(this.node.id), inputs = output[id]?.inputs;
+            if (!inputs) throw new Error("找不到导演台节点。");
+            inputs.project = JSON.stringify({ ...JSON.parse(inputs.project), mask_preview: { layer: layer.id } });
+            const response = await api.fetchApi("/prompt", {
+                method: "POST", headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ client_id: api.clientId, prompt: output, extra_data: { extra_pnginfo: { workflow } }, partial_execution_targets: [id] }),
             });
-            picker.onchange = e => { item.detector = e.target.value; this.commit(); };
-            const [x, y, bw, bh] = item.box;
-            return h(`div.card${this.boxing === i ? ".active" : ""}`, {},
-                h("header.row", {}, h("b", {}, `精修 ${i + 1}`), this.check(item, "enabled", "启用"), h("span.grow"),
-                    h("button.danger", { onclick: () => { shot.details.splice(i, 1); this.commit(true); } }, "删除")),
-                h("div.row", {}, h("button.primary", { onclick: () => this.startBox(i) }, "在画面上框选区域"),
-                    h("span.dim", {}, `${Math.round(x * 100)}%,${Math.round(y * 100)}% · ${Math.round(bw * 100)}%×${Math.round(bh * 100)}%`)),
-                this.field("区域", this.seg([["none", "固定区域"], ["face", "跟随人脸"]], item.follow, v => { item.follow = v; this.commit(true); })),
-                item.follow === "face" ? this.field("人脸检测器（models/ultralytics/bbox）", picker) : null,
-                this.field("精修强度（越高细节越多，也越可能改变长相）", this.slider(item, "denoise", 0.1, 0.9, 0.05)),
-                this.field("精修清晰度（裁剪后放大到的像素量，MP）", this.slider(item, "megapixels", 0.2, 1, 0.05)),
-                this.range(item),
-                this.field("精修提示词（留空沿用镜头提示词）", h("textarea", { rows: 3, value: item.prompt, placeholder: "例如：清晰的面部特写，皮肤细节自然", oninput: e => { item.prompt = e.target.value; this.commit(); } })),
-                this.reseed(item));
+            if (!response.ok) {
+                const body = await response.json().catch(() => ({}));
+                throw new Error(body.error?.message || `HTTP ${response.status}`);
+            }
+            this.panel.say("已加入队列：识别重绘层的遮罩，完成后在“局部重绘”页显示。");
+        } catch (error) {
+            alert(`识别预览没能开始：${error.message}`);
+        }
+    }
+
+    repaintPane() {
+        const shot = this.shot, node = this.node, project = this.project;
+        const linked = name => node.inputs?.some(i => i.name === name && i.link != null);
+        const masks = graphInputs(node, "mask"), previews = node.properties?.yh3Masks || {}, english = node.properties?.yh3Targets || {};
+        const editsSource = shot.kind === "source" && !shot.source.regen;
+        const thumb = (url, label) => h("div.slot.filled", {
+            style: { width: "84px", aspectRatio: `${project.width}/${project.height}`, backgroundImage: url ? `url("${url}")` : "none" } }, label);
+        const cards = shot.repaints.map((layer, i) => {
+            const set = (key, value) => { layer[key] = value; this.commit(true); };
+            const [x, y, bw, bh] = layer.box;
+            const where = h("span.dim", {}, `${Math.round(x * 100)}%,${Math.round(y * 100)}% · ${Math.round(bw * 100)}%×${Math.round(bh * 100)}%`);
+            const foreign = layer.target && !/^[\x00-\x7f]*$/.test(layer.target);
+            const sources = {
+                paint: () => h("div.row", {}, thumb(layer.mask && mediaUrl(layer.mask), layer.mask ? "" : "无遮罩"),
+                    h("button.primary", { onclick: () => this.startPaint(i) }, layer.mask ? "编辑遮罩" : "在画面上绘制遮罩")),
+                input: () => (masks.length
+                    ? h("div.row", {}, thumb(layer.input && this.preview({ input: layer.input })?.url, layer.input || "未选择"),
+                        h("select", { onchange: e => set("input", e.target.value) }, h("option", { value: "" }, "选择遮罩输入…"),
+                            ...masks.map(m => h("option", { value: m.input, selected: layer.input === m.input }, m.label))))
+                    : h("div.warn", {}, "节点上还没有连接遮罩：把 MASK 接到导演台的 masks 输入。")),
+                text: () => [
+                    linked("sam3") && linked("sam3_clip") ? null : h("div.warn", {},
+                        "导演台的 sam3 / sam3_clip 还没接：用 CheckpointLoaderSimple 加载 sam3.1_multiplex_fp16.safetensors，MODEL 接 sam3、CLIP 接 sam3_clip。"),
+                    this.field("识别目标（英文短语最准，如 girl in red raincoat；多个用逗号分隔，写成 cup:2 最多取 2 个）",
+                        h("input", { type: "text", value: layer.target, placeholder: "girl in red raincoat", onchange: e => set("target", e.target.value.trim()) })),
+                    !foreign ? null : english[layer.target] ? h("div.dim", {}, `SAM 3 用：${english[layer.target]}`)
+                        : linked("rewriter") ? h("div.dim", {}, "运行或预览时由改写模型翻成英文。")
+                            : h("div.warn", {}, "SAM 3 只认英文：写英文，或接上改写模型自动翻译。"),
+                    h("div.row", {}, this.field("识别阈值（低：更容易认到，也更容易认错）", this.slider(layer, "threshold", 0.1, 0.9, 0.05)),
+                        this.field("最多目标（0 不限）", this.number(layer, "objects", { min: 0, max: 64 }))),
+                ],
+                face: () => [h("div.row", {}, h("button.primary", { onclick: () => this.startBox(i) }, "在画面上框住这张脸"), where),
+                    this.field("人脸检测器（models/ultralytics/bbox）", this.detectorPicker(layer))],
+                box: () => h("div.row", {}, h("button.primary", { onclick: () => this.startBox(i) }, "在画面上框选区域"), where),
+            };
+            const preview = previews[layer.id];
+            const seen = layer.crop ? "成片（先运行一次）" : editsSource ? "源视频" : "本镜生成的画面（先运行一次）";
+            return h(`div.card${this.paint === i || this.boxing === i ? ".active" : ""}`, {},
+                h("header.row", {}, h("b", {}, `重绘 ${i + 1}`), this.check(layer, "enabled", "启用"), h("span.grow"),
+                    h("button.danger", { onclick: () => { shot.repaints.splice(i, 1); this.commit(true); } }, "删除")),
+                this.field("遮罩来源", this.seg(SOURCES, layer.source, v => set("source", v))),
+                sources[layer.source](),
+                h("div.row", {}, h("button", { onclick: () => this.previewMask(layer) }, "识别预览"), h("span.dim", {}, `在${seen}上看这层的遮罩`)),
+                preview ? h("img.maskpreview", { src: mediaUrl(preview.image), onerror: e => e.target.remove() }) : null,
+                preview ? h("div.dim", {}, `遮罩覆盖 ${Math.round(preview.coverage * 100)}% 的画面 · ${preview.frames} 帧`) : null,
+                this.check(layer, "crop", "放大贴回：裁出遮罩区域、放大后重绘再贴回（适合脸、手、小物体；在二采后的成片上进行）", () => this.commit(true)),
+                layer.crop ? this.field("清晰度（裁剪后放大到的像素量，MP）", this.slider(layer, "megapixels", 0.2, 1, 0.05)) : null,
+                this.field(layer.crop ? "强度（放大贴回常用 0.3–0.5；越高细节越多，也越可能改样子）" : "重绘强度（1 = 遮罩内完全重新生成）",
+                    this.slider(layer, "strength", 0.05, 1, 0.05)),
+                this.range(layer),
+                this.field("本层提示词（留空沿用镜头提示词）", h("textarea", { rows: 3, value: layer.prompt, oninput: e => { layer.prompt = e.target.value; this.commit(); } })),
+                // A cropped box or face is pasted back with its own ellipse / feathered frame.
+                layer.crop && boxed(layer) ? h("div.row", {}, this.reseed(layer))
+                    : h("div.row", {}, this.field("遮罩扩展 px", this.number(layer, "grow", { min: 0, max: 256 })),
+                        this.field("边缘羽化 px", this.number(layer, "feather", { min: 0, max: 256 })), this.reseed(layer)));
         });
-        const master = widget(this.node, "detail");
-        const rendered = this.result?.timeline?.some(e => e.id === shot.id);
+        const master = widget(node, "detail"), crops = shot.repaints.some(layer => layer.crop);
         return [
-            h("div.note", {}, "局部精修把成片里的一块区域（脸、手、小物体）裁出来放大，低强度重新采样后羽化贴回，让细节更清楚。"),
-            h("div.card", {}, h("b", {}, "用法"),
-                h("div", {}, "① 先运行一次，得到本镜成片。"),
-                h("div", {}, "② 点下面“+ 新建精修区域”，在舞台的成片上拖出一个框；人物在动就选“跟随人脸”。"),
-                h("div", {}, "③ 调精修强度后再运行：镜头读缓存，只重跑精修。")),
-            master ? h("label.row", {}, h("input", { type: "checkbox", checked: !!master.value,
+            h("div.note", {}, editsSource
+                ? "遮罩区域按提示词重新生成，遮罩外保持源视频原样。"
+                : "只重新生成遮罩区域。不勾“放大贴回”时在首采上原位重绘，二采把它一起放大；接了 inpaint_patch（Fun ControlNet）时遮罩区更贴合周围画面。"
+                    + "勾上则在成片上把遮罩区域裁出来放大重绘、再贴回。"),
+            crops && master ? h("label.row", {}, h("input", { type: "checkbox", checked: !!master.value,
                 onchange: e => { master.value = e.target.checked; changed(); this.project.detail.enabled = master.value; this.renderInspector(); } }),
-                "局部精修总开关（节点参数 detail）") : null,
-            master && !master.value ? h("div.warn", {}, "总开关已关闭：下面的精修区域运行时都会跳过。") : null,
-            !rendered && shot.kind === "generate" ? h("div.warn", {}, "本镜还没有成片：可以先按关键帧构图框选，运行一次后在成片上框更准。") : null,
+                "放大贴回总开关（节点参数 detail）") : null,
+            crops && master && !master.value ? h("div.warn", {}, "总开关已关闭：放大贴回的层运行时都会跳过。") : null,
             ...cards,
-            h("button", { onclick: () => {
-                shot.details.push({ id: uid(), enabled: true, box: [0.3, 0.15, 0.4, 0.5], follow: "none", detector: "face_yolov8m.pt", start: 0, end: -1, prompt: "", denoise: 0.4, megapixels: 0.5, seed: 0 });
-                this.commit(true);
-                this.startBox(shot.details.length - 1);
-            } }, "+ 新建精修区域"),
+            h("button", { onclick: () => { shot.repaints.push(newLayer()); this.commit(true); this.startPaint(shot.repaints.length - 1); } }, "+ 新建重绘层"),
         ];
     }
 

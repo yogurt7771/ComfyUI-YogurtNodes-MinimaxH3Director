@@ -1,4 +1,4 @@
-"""局部精修: crop a (tracked) region of the decoded shot, resample it at a higher resolution, stitch it back.
+"""局部重绘 放大贴回: crop a (tracked or masked) region of the decoded shot, resample it at a higher resolution, stitch it back.
 
 Tracking and stitching follow the approach of ComfyUI-H3-FaceRefine (MIT) as integrated in
 ComfyUI_MiniMaxH3_Director (Apache-2.0): per-frame detection, gap interpolation, smoothed
@@ -64,22 +64,63 @@ def _smooth(values, window):
     return np.convolve(np.pad(values, pad, mode="reflect"), kernel / kernel.sum(), mode="valid")
 
 
-def track(frames, item, aspect):
-    """Per-frame crop boxes (x, y, w, h) in pixels with the crop canvas aspect."""
-    count, height, width = frames.shape[:3]
-    x, y, w, h = item["box"]
-    cx, cy = np.full(count, (x + w / 2) * width), np.full(count, (y + h / 2) * height)
-    size = np.full(count, h * height)
-    if item["follow"] == "face":
-        cx, cy, size = _follow_face(frames, item, cx[0], cy[0], size[0])
+def _boxes(cx, cy, size, aspect, width, height):
     boxes = []
-    for i in range(count):
+    for i in range(len(cx)):
         bh = min(size[i], height, width / aspect)
         bw = bh * aspect
         bx = min(max(cx[i] - bw / 2, 0.0), width - bw)
         by = min(max(cy[i] - bh / 2, 0.0), height - bh)
         boxes.append([float(bx), float(by), float(bw), float(bh)])
     return boxes
+
+
+def track(frames, item, aspect):
+    """Per-frame boxes (x, y, w, h) in pixels with ``aspect``: the drawn box, or the face it frames."""
+    count, height, width = frames.shape[:3]
+    x, y, w, h = item["box"]
+    cx, cy = np.full(count, (x + w / 2) * width), np.full(count, (y + h / 2) * height)
+    size = np.full(count, h * height)
+    if item["source"] == "face":
+        cx, cy, size = _follow_face(frames, item, cx[0], cy[0], size[0])
+    return _boxes(cx, cy, size, aspect, width, height)
+
+
+def box_masks(boxes, width, height, ellipse):
+    """[N, height, width] masks filling each box, or the ellipse inside it for a face."""
+    yy = torch.arange(height).view(-1, 1) + 0.5
+    xx = torch.arange(width).view(1, -1) + 0.5
+    masks = []
+    for bx, by, bw, bh in boxes:
+        if ellipse:
+            masks.append(((((xx - bx - bw / 2) / (0.4 * bw)) ** 2 + ((yy - by - bh / 2) / (0.4 * bh)) ** 2) <= 1.0).float())
+        else:
+            masks.append(((xx >= bx) & (xx < bx + bw) & (yy >= by) & (yy < by + bh)).float())
+    return torch.stack(masks)
+
+
+def mask_boxes(masks, megapixels):
+    """(crop boxes following a [N, H, W] mask, crop canvas), or (None, None) when the mask is empty.
+
+    A frame's box is the mask's bounding box with a margin, at the canvas aspect; frames without mask take their
+    neighbours' boxes and the path is smoothed like a face track."""
+    count, height, width = masks.shape
+    bounds = []
+    for i in range(count):
+        ys, xs = torch.nonzero(masks[i] > 0.5, as_tuple=True)
+        bounds.append((xs.min().item(), ys.min().item(), xs.max().item() + 1, ys.max().item() + 1) if len(xs) else None)
+    found = np.array([b is not None for b in bounds])
+    if not found.any():
+        return None, None
+    margin = 1.3
+    sizes = np.array([(b[2] - b[0], b[3] - b[1]) for b in bounds if b is not None], dtype=np.float64)
+    canvas = crop_canvas(*(np.median(sizes, axis=0) * margin), megapixels)
+    aspect = canvas[0] / canvas[1]
+    series = np.array([((b[0] + b[2]) / 2, (b[1] + b[3]) / 2, max(b[3] - b[1], (b[2] - b[0]) / aspect) * margin)
+                       if b is not None else (0.0, 0.0, 0.0) for b in bounds])
+    index = np.arange(count)
+    cx, cy, size = (np.interp(index, index[found], series[found, k]) for k in range(3))
+    return _boxes(_smooth(cx, 15), _smooth(cy, 15), _smooth(size, 31), aspect, width, height), canvas
 
 
 def _follow_face(frames, item, cx0, cy0, size0):
@@ -137,18 +178,20 @@ def paste_mask(width, height, ellipse, edge):
     return feather(mask[None], edge)[0]
 
 
-def stitch(frames, crops, boxes, ellipse):
-    """Warp ``crops`` back into ``frames`` (in place) and blend with colour matching inside the mask."""
+def stitch(frames, crops, boxes, ellipse, weights=None):
+    """Warp ``crops`` back into ``frames`` (in place) and blend with colour matching inside the mask: ``weights``
+    [N, h, w] in crop space (a layer's own feathered mask), else an ellipse or a feathered rectangle."""
     count, frame_h, frame_w = frames.shape[:3]
     crop_h, crop_w = crops.shape[1:3]
-    mask = paste_mask(crop_w, crop_h, ellipse, max(4, min(crop_w, crop_h) // 12))
+    mask = paste_mask(crop_w, crop_h, ellipse, max(4, min(crop_w, crop_h) // 12))[None, None]
     for i in range(0, count, 8):
         chunk = boxes[i:i + 8]
         theta = torch.tensor([[[frame_w / bw, 0.0, (frame_w - 2 * bx) / bw - 1.0],
                                [0.0, frame_h / bh, (frame_h - 2 * by) / bh - 1.0]] for bx, by, bw, bh in chunk])
         grid = F.affine_grid(theta, (len(chunk), 3, frame_h, frame_w), align_corners=False)
         patch = F.grid_sample(crops[i:i + 8].movedim(-1, 1).float(), grid, mode="bilinear", padding_mode="zeros", align_corners=False)
-        weight = F.grid_sample(mask.expand(len(chunk), 1, -1, -1), grid, mode="bilinear", padding_mode="zeros", align_corners=False)
+        source = mask.expand(len(chunk), 1, -1, -1) if weights is None else weights[i:i + 8, None].float()
+        weight = F.grid_sample(source, grid, mode="bilinear", padding_mode="zeros", align_corners=False)
         patch, weight = patch.movedim(1, -1), weight.movedim(1, -1)
         base = frames[i:i + 8]
         total = weight.sum(dim=(1, 2), keepdim=True).clamp_min(1e-6)

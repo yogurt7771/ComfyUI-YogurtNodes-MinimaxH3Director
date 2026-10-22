@@ -166,7 +166,7 @@ export class Painter {
             ctx.setLineDash([]);
             ctx.fillStyle = ctx.strokeStyle;
             ctx.font = `${Math.round(canvas.height / 28)}px sans-serif`;
-            ctx.fillText(`精修 ${i + 1}`, x + line * 2, y + canvas.height / 26);
+            ctx.fillText(`重绘 ${i + 1}`, x + line * 2, y + canvas.height / 26);
         });
         if (this.drag && (this.mode === "box" || this.tool === "rect")) {
             const [x0, y0] = this.drag.start, [x1, y1] = this.drag.last;

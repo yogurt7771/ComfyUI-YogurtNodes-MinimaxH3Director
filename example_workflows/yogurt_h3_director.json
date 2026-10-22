@@ -482,6 +482,20 @@
           "link": null
         },
         {
+          "localized_name": "sam3",
+          "name": "sam3",
+          "shape": 7,
+          "type": "MODEL",
+          "link": null
+        },
+        {
+          "localized_name": "sam3_clip",
+          "name": "sam3_clip",
+          "type": "CLIP",
+          "link": null,
+          "shape": 7
+        },
+        {
           "localized_name": "image_0",
           "name": "images.image_0",
           "shape": 7,

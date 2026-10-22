@@ -17,6 +17,14 @@ import folder_paths  # noqa: E402
 from comfy_api.latest import InputImpl  # noqa: E402
 
 
+def square_mask(path, box, size=(128, 64)):
+    pixels = np.zeros((size[1], size[0]), dtype=np.uint8)
+    x0, y0, x1, y1 = box
+    pixels[y0:y1, x0:x1] = 255
+    Image.fromarray(pixels).save(path)
+    return {"filename": Path(path).name, "subfolder": "", "type": "input"}
+
+
 def png(path, value, size=(128, 64), left_half=False):
     pixels = np.zeros((size[1], size[0]), dtype=np.uint8) if left_half else np.full((size[1], size[0], 3), value, dtype=np.uint8)
     if left_half:
@@ -31,9 +39,22 @@ class RenderTests(unittest.TestCase):
         self.root = Path(self.tmp.name)
         (self.root / "input").mkdir()
         (self.root / "output").mkdir()
-        self.saved_dirs = folder_paths.get_output_directory(), folder_paths.get_input_directory()
+        self.saved_dirs = folder_paths.get_output_directory(), folder_paths.get_input_directory(), folder_paths.get_temp_directory()
         folder_paths.set_output_directory(str(self.root / "output"))
         folder_paths.set_input_directory(str(self.root / "input"))
+        folder_paths.set_temp_directory(str(self.root / "temp"))
+        # SAM 3 stand-in: "left ..." marks the left half, "nothing" finds nothing, anything else a 20 px square.
+        self.tracked, self.saved_track = [], render.segment.track_mask
+
+        def track(model, clip, frames, target):
+            self.tracked.append((frames.clone(), target))
+            masks = torch.zeros(frames.shape[:3])
+            if target["text"].startswith("left"):
+                masks[:, :, : frames.shape[2] // 2] = 1.0
+            elif target["text"] != "nothing":
+                masks[:, 20:40, 40:60] = 1.0
+            return masks, int(masks.any())
+        render.segment.track_mask = track
         self.fake = FakeSampler()
         self.saved = render.sampling.sample, render.sampling.schedule, render.sampling.trajectory_noise, render.install_drift_control
         render.sampling.sample, render.sampling.schedule, render.sampling.trajectory_noise = self.fake.sample, self.fake.schedule, self.fake.trajectory_noise
@@ -42,8 +63,10 @@ class RenderTests(unittest.TestCase):
 
     def tearDown(self):
         render.sampling.sample, render.sampling.schedule, render.sampling.trajectory_noise, render.install_drift_control = self.saved
+        render.segment.track_mask = self.saved_track
         folder_paths.set_output_directory(self.saved_dirs[0])
         folder_paths.set_input_directory(self.saved_dirs[1])
+        folder_paths.set_temp_directory(self.saved_dirs[2])
         self.tmp.cleanup()
 
     def run_project(self, data, settings=None, media=None, **kwargs):
@@ -315,6 +338,135 @@ class RenderTests(unittest.TestCase):
         self.assertTrue(director.cache.exists(job.keys[0]["details"][0], ".mkv"))
         self.run_project({"shots": shots}, {"detail_steps": 4})
         self.assertEqual(self.fake.calls, [])
+
+    def test_text_mask_of_a_source_edit_is_tracked_once_on_the_source_frames(self):
+        write_video(self.root / "input" / "clip.mp4", 48, 128, 64, audio_seconds=2)
+        source = {"media": {"filename": "clip.mp4", "subfolder": "", "type": "input"}, "start": 6}
+        layer = {"id": "r", "source": "text", "target": "left person", "threshold": 0.4, "strength": 0.6, "grow": 0, "feather": 0}
+        shots = [{"id": "s", "kind": "source", "frames": 30, "prompt": "改左边", "source": source, "repaints": [layer]}]
+        job, _ = self.run_project({"shots": shots})
+        (call,) = self.fake.calls
+        self.assertEqual(call["video_mask"][0, 0, 0, 0].tolist(), [1.0] * 4 + [0.0] * 4)
+        ((frames, target),) = self.tracked
+        self.assertEqual((tuple(frames.shape), target["threshold"]), ((30, 64, 128, 3), 0.4))
+        self.assertTrue(torch.allclose(frames, job.source_frames(job.windows[0], 128, 64)[:30]))
+        self.assertIn("第 1 镜重绘 1：识别“left person”，1 个目标", job.report)
+        out = director.output.read_frames(job.keys[0]["frames"])
+        self.assertTrue(torch.allclose(out[:, :, 64:], job.source_frames(job.windows[0], 128, 64)[:30, :, 64:], atol=1 / 255))
+        # Cached: neither SAM 3 nor H3 runs again; a new threshold re-tracks and repaints.
+        self.run_project({"shots": shots})
+        self.assertEqual((len(self.tracked), self.fake.calls), (1, []))
+        layer["threshold"] = 0.5
+        self.run_project({"shots": shots})
+        self.assertEqual((len(self.tracked), len(self.fake.calls)), (2, 1))
+
+    def test_text_mask_of_a_generated_shot_tracks_the_frames_it_repaints(self):
+        shots = [{"id": "a", "frames": 30, "prompt": "一", "repaints": [{"source": "text", "target": "left girl", "start": 6, "end": 17, "grow": 0}]}]
+        self.run_project({"shots": shots})
+        base, repaint = self.fake.calls
+        ((frames, _),) = self.tracked
+        # Frames 6..17 of the decoded base, which the stand-in sampler filled with one colour per seed.
+        self.assertEqual(tuple(frames.shape), (12, 64, 128, 3))
+        self.assertTrue(torch.allclose(frames, torch.full_like(frames, (base["seed"] % 89 + 5) / 100)))
+        self.assertGreater(repaint["video_mask"][..., :4].sum().item(), 0)
+        self.assertEqual(repaint["video_mask"][..., 4:].abs().sum().item(), 0.0)
+
+    def test_crop_layer_regenerates_and_pastes_only_inside_its_mask(self):
+        mask = square_mask(self.root / "input" / "mask.png", (40, 20, 60, 40))
+        layer = {"id": "c", "mask": mask, "crop": True, "strength": 0.5, "megapixels": 0.1, "grow": 0, "feather": 0, "prompt": "细节"}
+        shots = [{"id": "a", "frames": 30, "prompt": "人物", "repaints": [layer]}]
+        job, _ = self.run_project({"shots": shots}, {"detail_steps": 4})
+        base, crop = self.fake.calls
+        self.assertEqual((crop["prompt"], crop["steps"], crop["start"]), ("细节", 4, 0.5))
+        # The crop keeps a margin around the square: its corner tokens stay, the square is regenerated.
+        self.assertEqual(crop["video_mask"].amax().item(), 1.0)
+        self.assertEqual(crop["video_mask"][..., 0, 0].abs().sum().item(), 0.0)
+        key = job.keys[0]["details"][0]
+        weights = director.cache.read_tensors(key)["mask"].float() / 255
+        middle = weights[:, weights.shape[1] // 2, weights.shape[2] // 2]
+        self.assertEqual((weights[:, 0, 0].max().item(), middle.min().item()), (0.0, 1.0))
+        self.assertTrue(any("重绘 1 放大贴回" in line for line in job.report))
+
+    def test_stitch_blends_through_the_given_weights(self):
+        frames, crops = torch.rand(2, 32, 32, 3), torch.rand(2, 32, 32, 3)
+        weights = torch.zeros(2, 32, 32)
+        weights[:, :, :16] = 1.0
+        before = frames.clone()
+        out = director.detail.stitch(frames, crops, [[0.0, 0.0, 32.0, 32.0]] * 2, False, weights)
+        self.assertTrue(torch.equal(out[:, :, 20:], before[:, :, 20:]))
+        self.assertFalse(torch.allclose(out[:, :, :12], before[:, :, :12]))
+
+    def test_empty_text_mask_skips_its_crop_layer_once(self):
+        shots = [{"id": "a", "frames": 30, "prompt": "一", "repaints": [{"source": "text", "target": "nothing", "crop": True}]}]
+        job, _ = self.run_project({"shots": shots})
+        self.assertEqual(len(self.fake.calls), 1)
+        self.assertIn("第 1 镜：重绘 1 的遮罩是空的，跳过", job.report)
+        self.run_project({"shots": shots})
+        self.assertEqual((self.fake.calls, len(self.tracked)), ([], 1))
+
+    def test_legacy_detail_region_is_a_box_crop_layer(self):
+        shots = [{"id": "a", "frames": 30, "prompt": "人物", "details": [{"box": [0.25, 0.25, 0.5, 0.5], "denoise": 0.5, "megapixels": 0.1}]}]
+        job, _ = self.run_project({"shots": shots}, {"detail_steps": 4})
+        (item,) = job.windows[0].shot["details"]
+        self.assertEqual((item["source"], item["strength"], item["crop"]), ("box", 0.5, True))
+        # A box crop is resampled whole and pasted with its feathered rectangle, so no mask is stored.
+        self.assertIsNone(self.fake.calls[1]["video_mask"].min().item() < 1.0 or None)
+        self.assertFalse(director.cache.exists(job.keys[0]["details"][0]))
+
+    def test_mask_preview_dims_outside_the_tracked_mask_without_sampling(self):
+        write_video(self.root / "input" / "clip.mp4", 48, 128, 64, audio_seconds=2)
+        source = {"media": {"filename": "clip.mp4", "subfolder": "", "type": "input"}, "start": 30}
+        shots = [{"id": "s", "kind": "source", "frames": 30, "prompt": "", "source": source,
+                  "repaints": [{"id": "r", "source": "text", "target": "left person", "start": 0, "end": 11, "grow": 0}]},
+                 {"id": "g", "frames": 30, "prompt": "一", "continue": False, "repaints": [{"id": "q", "source": "text", "target": "cup"}]}]
+        spec = director.project.load_project(json.dumps({"shots": shots}), {"width": 128, "height": 64})
+        job = render.Render("7", {}, spec, models(director), director.media.Media(), [11, 6, 1.0, "euler", "simple"])
+        info = job.preview("r")
+        self.assertEqual((info["frames"], info["coverage"]), (12, 0.5))
+        image = Path(folder_paths.get_temp_directory()) / info["image"]["subfolder"] / info["image"]["filename"]
+        with Image.open(image) as picture:
+            luma = np.asarray(picture.convert("L"), dtype=np.float32) / 255
+            self.assertEqual((picture.is_animated, picture.size), (True, (128, 64)))
+        # The tracked left half keeps its brightness, the rest is dimmed to a quarter.
+        self.assertAlmostEqual(luma[:, 68:].mean() / luma[:, :60].mean(), 0.25, delta=0.05)
+        self.assertEqual(self.fake.calls, [])
+        # A generated shot's mask is found on its own render, which does not exist yet.
+        with self.assertRaisesRegex(ValueError, "先运行一次"):
+            job.preview("q")
+
+    def test_node_preview_evaluates_only_sam3_vae_and_rewriter(self):
+        node = director.director.YogurtH3Director
+        shots = [{"id": "a", "frames": 30, "prompt": "", "repaints": [{"id": "r", "source": "text", "target": "cup"}]}]
+        inputs = dict(model=None, clip=None, vae=None, audio_vae=None, rewriter=None, sam3=None, sam3_clip=None, seed=1)
+        preview = json.dumps({"shots": shots, "mask_preview": {"layer": "r"}})
+        self.assertEqual(node.check_lazy_status(preview, **inputs), ["vae", "rewriter", "sam3", "sam3_clip"])
+        self.assertEqual(node.check_lazy_status(json.dumps({"shots": shots}), **{**inputs, "model": "loaded"}),
+                         ["clip", "vae", "audio_vae", "rewriter", "sam3", "sam3_clip"])
+        # Without a text target the SAM 3 checkpoint is never loaded.
+        shots[0]["repaints"][0]["source"] = "box"
+        self.assertEqual(node.check_lazy_status(json.dumps({"shots": shots}), **inputs), ["model", "clip", "vae", "audio_vae", "rewriter"])
+
+    def test_foreign_targets_are_translated_once_by_the_rewrite_model(self):
+        replies = []
+
+        class Chat:
+            def invoke(self, messages):
+                replies.append(messages[-1].content)
+                return SimpleNamespace(text="girl in red raincoat\n")
+        saved, director.rewrite.chat_model = director.rewrite.chat_model, lambda config: Chat()
+        try:
+            shots = [{"id": "a", "frames": 30, "prompt": "", "repaints": [{"source": "text", "target": "红雨衣女孩"}, {"source": "text", "target": "cup"}]}]
+            config = director.rewrite.rewriter_config("openai", "m", api_key="secret")
+            for _ in range(2):
+                spec = director.project.load_project(json.dumps({"shots": shots}), {"width": 128, "height": 64})
+                english = director.director._translate(spec, config, [])
+            self.assertEqual((english, replies), ({"红雨衣女孩": "girl in red raincoat"}, ["红雨衣女孩"]))
+            self.assertEqual([layer["target"].get("english") for layer in spec["shots"][0]["repaints"]], ["girl in red raincoat", None])
+            report = []
+            director.director._translate(spec, None, report)
+            self.assertIn("不是英文", report[0])
+        finally:
+            director.rewrite.chat_model = saved
 
     def test_soundtrack_locks_the_audio_and_is_kept_in_the_output(self):
         write_video(self.root / "input" / "music.mp4", 96, 64, 64, audio_seconds=4)

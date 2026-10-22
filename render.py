@@ -9,10 +9,13 @@ affects it, so editing one shot re-runs that shot and the shots continuing from 
 """
 
 from dataclasses import dataclass
+import functools
 import json
 import os
+import uuid
 import zlib
 
+from PIL import Image
 import torch
 
 import comfy.model_management
@@ -22,7 +25,7 @@ from comfy_extras.nodes_minimax_h3 import _encode_ref_audio, align_frame_count, 
 from comfy_extras.nodes_upscale_model import ImageUpscaleWithModel
 from server import PromptServer
 
-from . import cache, detail, latent_upscale, sampling
+from . import cache, detail, latent_upscale, sampling, segment
 from .cache import digest
 from .conditioning import encode_keyframes, encode_text, shot_conditioning
 from .continuation import carry_latent_tail, install_drift_control
@@ -51,6 +54,8 @@ class Models:
     steps: int
     cfg: float
     scheduler: str
+    sam3: object = None
+    sam3_clip: object = None
 
 
 def send_event(node_id, shot_id, stage, prompt=None):
@@ -70,6 +75,10 @@ def _decode(vae, video):
 
 def _latent(tensors):
     return sampling.av_latent(tensors["video"], tensors["audio"])
+
+
+def _pad(frames, length):
+    return torch.cat([frames, frames[-1:].expand(length - frames.shape[0], *frames.shape[1:])])
 
 
 def _store(key, latent):
@@ -99,7 +108,8 @@ class Render:
         self.env = {"base": digest(base), "inpaint": signature(["inpaint_patch"]),
                     "passes": [digest([base, lift, kind, settings, settings["upscaler"] == "h3_latent" and latent_upscale.identity(settings["latent_model"]),
                                        self.canvas[p], self.canvas[p + 1]]) for p, (kind, settings) in enumerate(self.passes)],
-                    "detail": digest([base, signature(["refine_model"]), project["detail"]])}
+                    "detail": digest([base, signature(["refine_model"]), project["detail"]]),
+                    "segment": signature(["sam3", "sam3_clip"])}
         self.report = list(report)
         self.final, self.refined, self.conds, self.keyframes, self.detail_conds = {}, {}, {}, {}, {}
         # Two-pass drafts keep the noise their generated audio was on, so the full-size pass continues that path.
@@ -165,7 +175,7 @@ class Render:
             previous = self.keys[i - 1] if window.carry else None
             layers = [digest(["base", self.env["base"], self._spec(window), self.tail_steps(shot), previous and previous["final"]])]
             for layer in shot["repaints"]:
-                layers.append(digest(["repaint", layers[-1], {**layer, "mask": self.media.identity(layer["mask"])}, self.env["inpaint"]]))
+                layers.append(digest(["repaint", layers[-1], self.layer_spec(layer), self.env["inpaint"]]))
             source = shot["source"]
             encoded = lambda size: digest(["source", self.media.identity(source["media"]), source["start"], window.gen, *size])
             passes = []
@@ -177,7 +187,7 @@ class Render:
                                           previous and previous["passes"][p]]))
             refined = passes[-1] if passes else encoded(self.canvas[0]) if self.passthrough(shot) else layers[-1]
             frames = digest(["frames", refined, window.head, window.keep])
-            details = [digest(["detail", frames, item, self.env["detail"]]) for item in shot["details"]]
+            details = [digest(["detail", frames, self.layer_spec(item), self.env["detail"]]) for item in shot["details"]]
             self.keys.append({"layers": layers, "final": layers[-1], "passes": passes, "refined": refined, "frames": frames, "details": details})
 
         # Backward pass: a shot's latent is needed for its own output or for the tail the next shot copies.
@@ -200,7 +210,7 @@ class Render:
             resume = max((j for j, key in enumerate(keys["layers"]) if cache.exists(key)), default=-1) if final else last
             self.need[i] = {"frames": frames, "passes": passes, "refine": any(passes), "final": final, "resume": resume,
                             "repaint": final and resume < last, "base": final and resume < 0,
-                            "details": [not cache.exists(key, ".mkv") for key in keys["details"]]}
+                            "details": [not cache.exists(key, ".json") for key in keys["details"]]}
 
     # ------------------------------------------------------------------ media helpers
 
@@ -231,17 +241,73 @@ class Render:
             audio = self.media.audio(shot["source"]["media"], shot["source"]["start"], window.gen)
         return self.encode_audio(audio, window.gen)
 
-    def repaint_pixels(self, window, layer, width, height):
-        """Grow and feather are in output pixels, the size the editor paints on."""
+    def layer_spec(self, layer):
+        """A 局部重绘 layer as its results depend on it: mask file or socket resolved, SAM 3 inputs for a text target."""
+        spec = {**layer, "mask": layer["mask"] and self.media.identity(layer["mask"]),
+                "segment": self.env["segment"] if layer["source"] == "text" else None}
+        del spec["number"]
+        return spec
+
+    def detect(self, i, layer, origin, frames):
+        """[F, H, W] masks of a detected source over ``frames()``, the F frames the layer repaints: a SAM 3 text target,
+        a followed face or a fixed box. Cached under ``origin``, what those frames are."""
+        key = digest(["mask", origin, self.layer_spec(layer)])
+        if cache.exists(key):
+            return cache.read_tensors(key)["mask"].float() / 255
+        frames = frames()
+        height, width = frames.shape[1:3]
+        if layer["source"] == "text":
+            self.event(i, "segmenting")
+            masks, found = segment.track_mask(self.m.sam3, self.m.sam3_clip, frames, layer["target"])
+            target = layer["target"]
+            named = f"“{target['text']}”" + (f"（{target['english']}）" if target.get("english") else "")
+            self.report.append(f"第 {i + 1} 镜重绘 {layer['number']}：识别{named}，{found} 个目标" if found
+                               else f"第 {i + 1} 镜重绘 {layer['number']}：没有识别到{named}，可降低识别阈值或换个说法")
+        else:
+            x, y, w, h = layer["box"]
+            boxes = detail.track(frames, layer, w * width / max(h * height, 1.0))
+            masks = detail.box_masks(boxes, width, height, layer["source"] == "face")
+        cache.write_tensors(key, {"mask": (masks * 255).round().to(torch.uint8)})
+        return masks
+
+    def layer_mask(self, i, j, behind=None):
+        """Mask of in-place layer ``j`` over the frames it repaints ([F, H, W]; a single frame is held). Detected masks
+        come from those frames on the draft canvas: the source video of a source edit, otherwise ``behind()``, the
+        decoded latent this layer starts from."""
+        window, layer = self.windows[i], self.windows[i].shot["repaints"][j]
+        if layer["mask"] is not None:
+            return self.media.mask(layer["mask"])
         a, b = window.span(layer["start"], layer["end"])
-        mask = sampling.window_mask(self.media.mask(layer["mask"]), window.gen, a, b, width, height)
+        if self.edits_source(window.shot):
+            source = window.shot["source"]
+            origin = ["source", self.media.identity(source["media"]), source["start"], window.gen, self.width, self.height]
+            return self.detect(i, layer, origin, lambda: self.source_frames(window, self.width, self.height)[a:b])
+        return self.detect(i, layer, self.keys[i]["layers"][j], lambda: behind()[a:b])
+
+    def repaint_pixels(self, i, j, width, height, behind=None):
+        """Layer ``j``'s mask on the generation frames at width x height; grow and feather are in output pixels, the
+        size the editor paints on."""
+        window, layer = self.windows[i], self.windows[i].shot["repaints"][j]
+        a, b = window.span(layer["start"], layer["end"])
+        mask = sampling.window_mask(self.layer_mask(i, j, behind), window.gen, a, b, width, height)
         return sampling.grow(mask, round(layer["grow"] * width / self.out_w))
 
-    def composite_mask(self, window, width, height):
+    def composite_mask(self, i, width, height):
         """Feathered union of the repaint masks; regenerated pixels are pasted over the original video with it."""
-        masks = [sampling.feather(self.repaint_pixels(window, layer, width, height), round(layer["feather"] * width / self.out_w))
-                 for layer in window.shot["repaints"]]
+        layers = self.windows[i].shot["repaints"]
+        masks = [sampling.feather(self.repaint_pixels(i, j, width, height), round(layer["feather"] * width / self.out_w))
+                 for j, layer in enumerate(layers)]
         return torch.stack(masks).amax(0)
+
+    def detail_masks(self, i, j, frames):
+        """Grown [F, H, W] masks of 放大贴回 layer ``j`` over ``frames``, its frames of the shot's output."""
+        item = self.windows[i].shot["details"][j]
+        count, height, width = frames.shape[:3]
+        if item["mask"] is not None:
+            masks = sampling.window_mask(self.media.mask(item["mask"]), count, 0, count, width, height)
+        else:
+            masks = self.detect(i, item, self.keys[i]["frames"], lambda: frames)
+        return sampling.grow(masks, item["grow"])
 
     # ------------------------------------------------------------------ stages
 
@@ -327,14 +393,14 @@ class Render:
     def repaint(self, i, latent, j):
         window, shot, m = self.windows[i], self.windows[i].shot, self.m
         layer = shot["repaints"][j]
-        pixels = self.repaint_pixels(window, layer, self.width, self.height)
         video, audio = sampling.streams(latent)
+        behind = functools.cache(lambda: self.source_frames(window, self.width, self.height) if self.edits_source(shot) else _decode(m.vae, video))
+        pixels = self.repaint_pixels(i, j, self.width, self.height, behind)
         video_mask = sampling.token_mask(pixels, video.shape[2])
         video_mask[:, :, :video_latent_t(window.head) if window.head else 0] = 0.0
         model = self.shot_model(shot)
         if m.inpaint_patch is not None:
-            behind = self.source_frames(window, self.width, self.height) if self.edits_source(shot) else _decode(m.vae, video)
-            model = sampling.inpaint_model(model, m.inpaint_patch, m.vae, (pixels > 0.5).float(), behind)
+            model = sampling.inpaint_model(model, m.inpaint_patch, m.vae, (pixels > 0.5).float(), behind())
         sigmas = sampling.schedule(model, m.steps, m.scheduler, layer["strength"], m.sigmas)
         positive, negative = self.conds[i].conds(layer["prompt"] or shot["prompt"], self.keyframes[i])
         masked = sampling.av_latent(video, audio, video_mask, sampling.locked_audio_mask(audio))
@@ -384,8 +450,8 @@ class Render:
                     # Source edits are composited with the source pixels, so they always take the pixel path.
                     frames = self.upscale(_decode(self.m.vae, video), w1, h1, settings["upscaler"])
                     if self.edits_source(shot):
-                        frames = torch.lerp(self.source_frames(window, w1, h1), frames, self.composite_mask(window, w1, h1)[..., None])
-                        pixels = torch.stack([self.repaint_pixels(window, layer, w1, h1) for layer in shot["repaints"]])
+                        frames = torch.lerp(self.source_frames(window, w1, h1), frames, self.composite_mask(i, w1, h1)[..., None])
+                        pixels = torch.stack([self.repaint_pixels(i, j, w1, h1) for j in range(len(shot["repaints"]))])
                         mask = sampling.token_mask(pixels.amax(0), video.shape[2])
                     video = self.m.vae.encode(frames)
                 if i in self.conds:
@@ -450,7 +516,7 @@ class Render:
                 frames = _decode(self.m.vae, video)
                 if self.edits_source(shot):
                     frames = torch.lerp(self.source_frames(window, self.out_w, self.out_h), frames,
-                                        self.composite_mask(window, self.out_w, self.out_h)[..., None])
+                                        self.composite_mask(i, self.out_w, self.out_h)[..., None])
             if self.audio_mode(shot) == "generate":
                 wave = self.m.audio_vae.decode(audio).movedim(-1, 1).float().cpu()
                 rate = int(self.m.audio_vae.first_stage_model.output_sample_rate)
@@ -458,7 +524,7 @@ class Render:
             write_frames(keys["frames"], frames[window.head:window.head + window.keep])
 
     def detail_shots(self):
-        """Crop and encode every refinement region (VAE), sample them all (UNET), then decode (VAE)."""
+        """放大贴回 layers: crop and encode every region (VAE), sample them all (UNET), then decode (VAE)."""
         jobs = []
         for i, window in enumerate(self.windows):
             frames = None
@@ -469,30 +535,45 @@ class Render:
                 self.event(i, "detailing")
                 frames = read_frames(self.keys[i]["frames"]) if frames is None else frames
                 a, b = window.frame(item["start"]) - window.head, window.frame(item["end"]) - window.head + 1
-                canvas = detail.crop_canvas(item["box"][2] * self.out_w, item["box"][3] * self.out_h, item["megapixels"])
-                boxes = detail.track(frames[a:b], item, canvas[0] / canvas[1])
+                weights = None
+                if item["source"] in ("face", "box"):
+                    canvas = detail.crop_canvas(item["box"][2] * self.out_w, item["box"][3] * self.out_h, item["megapixels"])
+                    boxes = detail.track(frames[a:b], item, canvas[0] / canvas[1])
+                else:
+                    masks = self.detail_masks(i, j, frames[a:b])
+                    boxes, canvas = detail.mask_boxes(masks, item["megapixels"])
+                    if boxes is None:
+                        cache.write_json(self.keys[i]["details"][j], [])
+                        self.report.append(f"第 {i + 1} 镜：重绘 {item['number']} 的遮罩是空的，跳过")
+                        continue
+                    weights = detail.crop(masks[..., None], boxes, *canvas)[..., 0]
                 crops = detail.crop(frames[a:b], boxes, *canvas)
                 length = align_frame_count(crops.shape[0])
-                padded = torch.cat([crops, crops[-1:].expand(length - crops.shape[0], -1, -1, -1)])
-                video = self.m.vae.encode(padded).to(comfy.model_management.intermediate_device())
-                jobs.append((i, j, item, boxes, crops.shape[0], video, self.silence(length)))
+                video = self.m.vae.encode(_pad(crops, length)).to(comfy.model_management.intermediate_device())
+                # A mask source only regenerates inside its mask; a box or face crop is resampled whole.
+                video_mask = None if weights is None else sampling.token_mask(_pad(weights, length), video.shape[2])
+                jobs.append((i, j, item, boxes, crops.shape[0], video, video_mask, weights, self.silence(length)))
         sampled = []
         model = self.m.refine_model if self.m.refine_model is not None else self.m.model
-        for i, j, item, boxes, count, video, silent in jobs:
+        for i, j, item, boxes, count, video, video_mask, weights, silent in jobs:
             comfy.model_management.throw_exception_if_processing_interrupted()
             self.event(i, "detailing")
-            latent = sampling.av_latent(video, silent, audio_mask=sampling.locked_audio_mask(silent))
-            sigmas = sampling.schedule(model, self.project["detail"]["steps"], self.m.scheduler, item["denoise"])
+            latent = sampling.av_latent(video, silent, video_mask, sampling.locked_audio_mask(silent))
+            sigmas = sampling.schedule(model, self.project["detail"]["steps"], self.m.scheduler, item["strength"])
             positive, negative = self.detail_conds[(i, j)]
             shot = self.windows[i].shot
             seed = self.seed(shot["id"], shot["seed"], item["id"], item["seed"])
-            sampled.append((i, j, boxes, count, sampling.sample(model, positive, negative, self.m.cfg, self.m.sampler, sigmas, latent, seed)))
-        for i, j, boxes, count, samples in sampled:
+            sampled.append((i, j, item, boxes, count, weights, sampling.sample(model, positive, negative, self.m.cfg, self.m.sampler, sigmas, latent, seed)))
+        for i, j, item, boxes, count, weights, samples in sampled:
             crops = _decode(self.m.vae, sampling.streams(samples)[0])[:count]
             key = self.keys[i]["details"][j]
-            cache.write_json(key, boxes)
             write_frames(key, crops)
-            self.report.append(f"第 {i + 1} 镜：局部精修 {j + 1}（{crops.shape[2]}×{crops.shape[1]}）")
+            if weights is not None:
+                # Feather is in output pixels; the crop is enlarged by its width over the box width.
+                edge = round(item["feather"] * crops.shape[2] * len(boxes) / sum(box[2] for box in boxes))
+                cache.write_tensors(key, {"mask": (sampling.feather(weights, edge) * 255).round().to(torch.uint8)})
+            cache.write_json(key, boxes)
+            self.report.append(f"第 {i + 1} 镜：重绘 {item['number']} 放大贴回（{crops.shape[2]}×{crops.shape[1]}）")
 
     # ------------------------------------------------------------------ assembly
 
@@ -529,9 +610,13 @@ class Render:
                 keys = self.keys[window.index]
                 frames = read_frames(keys["frames"])
                 for item, key in zip(window.shot["details"], keys["details"]):
+                    boxes = cache.read_json(key)
+                    if not boxes:
+                        continue
                     a = window.frame(item["start"]) - window.head
-                    boxes, crops = cache.read_json(key), read_frames(key)
-                    frames[a:a + crops.shape[0]] = detail.stitch(frames[a:a + crops.shape[0]], crops, boxes, item["follow"] == "face")
+                    crops = read_frames(key)
+                    weights = cache.read_tensors(key)["mask"].float() / 255 if cache.exists(key) else None
+                    frames[a:a + crops.shape[0]] = detail.stitch(frames[a:a + crops.shape[0]], crops, boxes, item["source"] == "face", weights)
                 writer.write(frames)
                 wave, at = self.shot_audio(window)
                 lo, hi = round(at * AUDIO_RATE / FPS), round((window.start + window.keep) * AUDIO_RATE / FPS)
@@ -549,9 +634,60 @@ class Render:
         os.replace(temporary, path)
         return InputImpl.VideoFromFile(path), {"filename": name, "subfolder": subfolder, "type": "output"}
 
+    def detect_sources(self):
+        """Detected masks of source edits come from the source video, so SAM 3 / face detection runs before H3 does."""
+        for i, window in enumerate(self.windows):
+            flags = self.need[i]
+            if self.edits_source(window.shot) and (flags["final"] or flags["refine"] or flags["frames"]):
+                for j, layer in enumerate(window.shot["repaints"]):
+                    if layer["mask"] is None:
+                        self.layer_mask(i, j)
+
+    def preview(self, layer_id):
+        """One layer's mask over the frames it repaints, as an animated WebP in temp for the editor."""
+        self.plan()
+        for i, window in enumerate(self.windows):
+            shot = window.shot
+            for j, layer in enumerate(shot["repaints"]):
+                if layer["id"] != layer_id:
+                    continue
+                a, b = window.span(layer["start"], layer["end"])
+                if self.edits_source(shot):
+                    frames = self.source_frames(window, self.width, self.height)
+                else:
+                    key = self.keys[i]["layers"][j]
+                    if not cache.exists(key):
+                        raise ValueError(f"第 {i + 1} 镜还没有生成：先运行一次，再预览重绘 {layer['number']} 的遮罩（它在本镜生成的画面上识别）。")
+                    frames = _decode(self.m.vae, sampling.streams(_latent(cache.read_tensors(key)))[0])
+                masks = self.repaint_pixels(i, j, self.width, self.height, lambda: frames)[a:b]
+                return self._preview(layer, frames[a:b], masks)
+            for j, item in enumerate(shot["details"]):
+                if item["id"] != layer_id:
+                    continue
+                if not cache.exists(self.keys[i]["frames"], ".mkv"):
+                    raise ValueError(f"第 {i + 1} 镜还没有成片：先运行一次，再预览重绘 {item['number']} 的遮罩（放大贴回在成片上识别）。")
+                a, b = window.frame(item["start"]) - window.head, window.frame(item["end"]) - window.head + 1
+                frames = read_frames(self.keys[i]["frames"])[a:b]
+                return self._preview(item, frames, self.detail_masks(i, j, frames))
+        raise ValueError("要预览的重绘层不在工程里：可能已删除，或没有启用。")
+
+    def _preview(self, layer, frames, masks):
+        # The frame outside the mask is dimmed, so the selection shows whatever its colour.
+        shown = frames[..., :3].float() * (0.25 + 0.75 * masks[..., None])
+        images = [Image.fromarray((frame.clamp(0, 1) * 255).byte().numpy()) for frame in shown]
+        for image in images:
+            image.thumbnail((480, 480))
+        folder = os.path.join(folder_paths.get_temp_directory(), "yogurt_h3", "masks")
+        os.makedirs(folder, exist_ok=True)
+        name = f"{self.node_id}_{layer['id']}_{uuid.uuid4().hex[:8]}.webp"
+        images[0].save(os.path.join(folder, name), save_all=True, append_images=images[1:], duration=round(1000 / FPS), loop=0, quality=70)
+        return {"layer": layer["id"], "image": {"filename": name, "subfolder": "yogurt_h3/masks", "type": "temp"},
+                "frames": len(images), "coverage": round(float(masks.mean()), 4), "report": self.report}
+
     def run(self, filename_prefix):
         self.plan()
         self.encode()
+        self.detect_sources()
         self.sample_shots()
         self.refine_shots()
         self.decode_shots()

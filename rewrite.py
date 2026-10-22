@@ -95,6 +95,29 @@ class YogurtH3RewriteModel(io.ComfyNode):
         return io.NodeOutput(rewriter_config(provider, model, base_url, api_key, temperature, max_tokens, vision))
 
 
+TRANSLATE = """Rewrite the user's description of what to select in a video as the short English noun phrase an \
+open-vocabulary segmentation model (SAM 3) expects, e.g. "girl in red raincoat". Keep commas between separate things \
+and any ":N" count after a thing. Reply with the phrase only."""
+
+
+def english_targets(texts, config):
+    """{text: English phrase} for SAM 3 targets written in another language; one cached model call per text."""
+    from langchain_core.messages import HumanMessage, SystemMessage
+
+    model = {k: v for k, v in config.items() if k != "api_key"}
+    out, chat = {}, None
+    for text in texts:
+        key = digest(["sam3-target-1", model, text])
+        if cache.exists(key, ".json"):
+            out[text] = cache.read_json(key)["english"]
+            continue
+        chat = chat or chat_model(config)
+        reply = str(chat.invoke([SystemMessage(TRANSLATE), HumanMessage(text)]).text).strip()
+        out[text] = reply.splitlines()[0].strip().strip('"') if reply else text
+        cache.write_json(key, {"english": out[text]})
+    return out
+
+
 def chat_model(config):
     from langchain.chat_models import init_chat_model
 

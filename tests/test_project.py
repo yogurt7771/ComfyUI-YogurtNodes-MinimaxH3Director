@@ -14,6 +14,32 @@ def build(*shots, settings=None, **extra):
     return project.load_project(json.dumps({"shots": list(shots), **extra}), {"width": 128, "height": 64, **(settings or {})})
 
 
+class LayerTests(unittest.TestCase):
+    def layers(self, *items):
+        shot = build({"frames": 30, "repaints": list(items)})["shots"][0]
+        return shot["repaints"] + shot["details"]
+
+    def test_mask_sources(self):
+        painted = {"filename": "m.png", "subfolder": "", "type": "input"}
+        layers = self.layers({"mask": painted}, {"source": "input", "input": "mask_1", "mask": painted},
+                             {"mask": {"input": "mask_0", "file": painted}}, {"source": "text", "target": " girl, umbrella:2 ", "objects": 99},
+                             {"source": "text", "target": "  "}, {"source": "face", "box": [0.2, 0.2, 0.3, 0.4]}, {"source": "box"})
+        self.assertEqual([(layer["source"], layer["number"]) for layer in layers], [("paint", 1), ("input", 2), ("input", 3), ("text", 4), ("face", 6)])
+        self.assertEqual([layer["mask"] for layer in layers[:3]], [painted, {"input": "mask_1"}, {"input": "mask_0"}])
+        self.assertEqual(layers[3]["target"], {"text": "girl, umbrella:2", "threshold": 0.5, "objects": 64})
+        self.assertEqual(layers[4]["box"], [0.2, 0.2, 0.3, 0.4])
+
+    def test_crop_switch_moves_a_layer_after_the_draft(self):
+        shot = build({"frames": 30, "repaints": [{"source": "box", "box": [0, 0, 1, 1], "crop": True, "strength": 0.3},
+                                                 {"source": "box", "box": [0, 0, 1, 1]}]})["shots"][0]
+        self.assertEqual([(layer["number"], layer["strength"]) for layer in shot["details"]], [(1, 0.3)])
+        self.assertEqual([layer["number"] for layer in shot["repaints"]], [2])
+
+    def test_mask_preview_request(self):
+        self.assertEqual(build({"frames": 30}, mask_preview={"layer": 7})["preview"], {"layer": "7"})
+        self.assertIsNone(build({"frames": 30})["preview"])
+
+
 class WindowTests(unittest.TestCase):
     def test_single_shot_crops_grid_padding(self):
         (window,) = project.plan_windows(build({"frames": 100}))
@@ -73,6 +99,10 @@ class WindowTests(unittest.TestCase):
         self.assertEqual(len(shot["refs"]["images"]), 11)
 
     def test_detail_switch_drops_every_region(self):
+        layers = {"frames": 30, "details": [{"box": [0.1, 0.1, 0.3, 0.3]}],
+                  "repaints": [{"source": "box", "box": [0, 0, 0.5, 0.5], "crop": True}, {"source": "box", "box": [0, 0, 0.5, 0.5]}]}
+        self.assertEqual(len(build(layers)["shots"][0]["details"]), 2)
+        self.assertEqual(len(build(layers, settings={"detail": False})["shots"][0]["repaints"]), 1)
         shot = {"frames": 30, "details": [{"box": [0.1, 0.1, 0.3, 0.3]}]}
         self.assertEqual(len(build(shot)["shots"][0]["details"]), 1)
         self.assertEqual(build(shot, settings={"detail": False})["shots"][0]["details"], [])
