@@ -279,6 +279,17 @@ class RenderTests(unittest.TestCase):
         self.run_project({"shots": shots}, {**settings, "rerender_denoise": 0.6})
         self.assertEqual([(c["start"], c["shape"][-2:]) for c in self.fake.calls], [(0.6, (16, 32))] * 2)
 
+    def test_base_cache_key_follows_the_sampler_settings_not_the_passes(self):
+        shots = [{"id": "a", "frames": 30, "prompt": "一"}]
+        settings = {"rerender": True, "rerender_scale": 2.0, "width": 256, "height": 128}
+        self.run_project({"shots": shots}, settings)
+        self.run_project({"shots": shots}, {**settings, "rerender_denoise": 0.6})
+        self.assertEqual([c["start"] for c in self.fake.calls], [0.6])
+        spec = director.project.load_project(json.dumps({"shots": shots}), settings)
+        envs = [render.Render("7", {}, spec, models(director), director.media.Media(), [11, steps, 1.0, "euler", "simple"]).env["base"]
+                for steps in (6, 8)]
+        self.assertNotEqual(*envs)
+
     def test_passthrough_source_is_encoded_on_every_pass_canvas_for_the_shot_after_it(self):
         write_video(self.root / "input" / "clip.mp4", 48, 512, 256, audio_seconds=2)
         source = {"media": {"filename": "clip.mp4", "subfolder": "", "type": "input"}, "start": 0}

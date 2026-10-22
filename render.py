@@ -88,9 +88,9 @@ class Render:
         self.refine = refine if self.passes else None
         # canvas[p] is what pass p starts from and canvas[p + 1] what it samples on; canvas[0] is the draft.
         self.canvas = [(self.out_w, self.out_h)]
-        for _, settings in reversed(self.passes):
+        for _, options in reversed(self.passes):
             w, h = self.canvas[0]
-            self.canvas.insert(0, (_round32(w / settings["scale"]), _round32(h / settings["scale"])))
+            self.canvas.insert(0, (_round32(w / options["scale"]), _round32(h / options["scale"])))
         self.width, self.height = self.canvas[0]
         signature = lambda names: cache.upstream_signature(prompt, node_id, names)
         base = [VERSION, signature(["model", "ref_model", "clip", "vae", "audio_vae", "sampler", "sigmas"]), settings,
