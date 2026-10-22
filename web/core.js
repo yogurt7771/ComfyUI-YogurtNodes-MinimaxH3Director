@@ -107,15 +107,13 @@ export function writeProject(node, project) {
     changed();
 }
 
-const INPUT_LABELS = { image: "图输入", mask: "遮罩输入", video: "视频输入", audio: "音频输入" };
-
 /** Connected Autogrow sockets of the given kinds the project can reference, e.g. {input: "video_0"}. */
 export function graphInputs(node, ...kinds) {
     return kinds.flatMap(kind => {
         const pattern = new RegExp(`(^|\\.)${kind}_(\\d+)$`);
         return (node.inputs || []).filter(i => i.link != null && pattern.test(i.name)).map(i => {
             const input = `${kind}_${i.name.match(pattern)[2]}`;
-            return { input, label: mediaLabel({ input }) };
+            return { input, label: input };
         });
     });
 }
@@ -156,13 +154,32 @@ export function storePrompts(node, prompts, report) {
     changed();
 }
 
-export function mediaLabel(m) {
-    if (!m) return "未选择";
-    if (m.input) {
-        const [kind, n] = m.input.split("_");
-        return `${INPUT_LABELS[kind]} ${Number(n) + 1}`;
-    }
-    return m.filename;
+/** A connected socket is named exactly as on the node (image_0, video_1, ...). */
+export const mediaLabel = m => (!m ? "未选择" : m.input || m.filename);
+
+/** "sub/name.png [output]" as LoadImage / LoadVideo widgets store it -> a media item. */
+function annotated(value) {
+    const [, path, type] = /^(.*?)(?: \[(input|output|temp)\])?$/.exec(String(value));
+    const slash = path.lastIndexOf("/");
+    return { filename: path.slice(slash + 1), subfolder: slash < 0 ? "" : path.slice(0, slash), type: type || "input" };
+}
+
+/**
+ * What the editor can show for a connected socket: the file of a loader wired straight into it, or the thumbnail the
+ * last run saved (for anything processed upstream). {url, video} / {audio, name}, or null when nothing is known yet.
+ */
+export function inputPreview(node, input) {
+    const slot = node.inputs?.find(i => i.link != null && (i.name === input || i.name.endsWith(`.${input}`)));
+    const links = app.graph.links;
+    const link = slot && (links.get ? links.get(slot.link) : links[slot.link]);
+    const origin = link ? app.graph.getNodeById(link.origin_id) : null;
+    const value = name => origin?.widgets?.find(w => w.name === name)?.value;
+    if (origin?.type === "LoadVideo" && value("file")) return { url: mediaUrl(annotated(value("file"))), video: true };
+    if (origin?.type === "LoadAudio" && value("audio")) return { audio: true, name: annotated(value("audio")).filename };
+    // A mask socket fed by LoadImage carries its alpha channel, not the picture, so masks wait for the run thumbnail.
+    if (origin?.type === "LoadImage" && value("image") && input.startsWith("image_")) return { url: mediaUrl(annotated(value("image"))) };
+    const saved = node.properties?.yh3Inputs?.[input];
+    return saved ? { url: mediaUrl(saved) } : null;
 }
 
 export function mediaUrl(m) {
@@ -312,6 +329,7 @@ const css = `
 .yh3-modal .slot.filled { border-style:solid; }
 .yh3-modal .slot.drop { border-color:var(--yh3-accent); }
 .yh3-modal .slot .tag { position:absolute; left:3px; top:3px; background:#000b; border-radius:4px; padding:0 4px; font-size:10px; color:#fff; }
+.yh3-modal .slot .src { position:absolute; left:3px; bottom:3px; background:#000b; border-radius:4px; padding:0 4px; font-size:10px; color:#9fd0ff; }
 .yh3-modal .slot .x { position:absolute; right:3px; top:3px; padding:0 5px; line-height:16px; border-radius:4px; background:#000b; border:0; }
 .yh3-modal .slot video { width:100%; height:100%; object-fit:cover; }
 .yh3-modal .chips { display:flex; flex-wrap:wrap; gap:4px; }

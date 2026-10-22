@@ -2,7 +2,7 @@
 import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
 import {
-    FPS, SHARED, STAGES, changed, clamp, clone, effectiveRefs, features, graphInputs, h, isAudio, isVideo, mediaLabel, mediaUrl, refCount,
+    FPS, SHARED, STAGES, changed, clamp, clone, effectiveRefs, features, graphInputs, h, inputPreview, isAudio, isVideo, mediaLabel, mediaUrl, refCount,
     newShot, pickFile, planWindows, previewRewrite, projectData, readProject, rewritable, rewriterConfig, secs, storePrompts, totalFrames, uid,
     upload, widget, writeProject,
 } from "./core.js";
@@ -163,7 +163,7 @@ class Editor {
 
     /** Storyboard frame of a generated shot: the last keyframe at or before kept frame ``frame``, else the first one. */
     keyAt(frame) {
-        const keys = this.shot.keyframes.filter(k => mediaUrl(k.media))
+        const keys = this.shot.keyframes.filter(k => this.preview(k.media)?.url)
             .map(k => ({ ...k, pos: k.at === -1 ? this.win.keep - 1 : clamp(k.at, 0, this.win.keep - 1) })).sort((a, b) => a.pos - b.pos);
         return keys.filter(k => k.pos <= frame).pop() || keys[0] || null;
     }
@@ -173,12 +173,13 @@ class Editor {
         const shot = this.shot, entry = this.result?.timeline?.find(e => e.id === shot.id);
         if (this.trim) {
             const clip = this.trim.clip;
-            return { kind: "video", url: mediaUrl(clip.media), base: clip.start, label: `素材：参考视频 ${this.trim.tag}`, trim: clip, length: this.win.gen };
+            return { kind: "video", url: this.preview(clip.media).url, base: clip.start, label: `素材：参考视频 ${this.trim.tag}`, trim: clip, length: this.win.gen };
         }
         if (this.showsResult()) return { kind: "video", url: mediaUrl(this.result.video), base: entry.start, label: "上次成片", stale: entry.frames !== this.win.keep };
         if (shot.kind === "source") {
-            const url = mediaUrl(shot.source.media);
-            return url ? { kind: "video", url, base: shot.source.start, label: "素材：源视频", trim: shot.source, length: this.win.keep } : { kind: "none" };
+            const shown = this.preview(shot.source.media);
+            return shown?.video ? { kind: "video", url: shown.url, base: shot.source.start, label: "素材：源视频", trim: shot.source, length: this.win.keep }
+                : { kind: "none" };
         }
         return { kind: "storyboard", label: "素材：关键帧" };
     }
@@ -197,7 +198,7 @@ class Editor {
         this.video.style.display = source.kind === "video" ? "" : "none";
         this.image.style.display = source.kind === "storyboard" ? "" : "none";
         this.placeholder.style.display = source.kind === "none" ? "" : "none";
-        this.placeholder.textContent = this.shot.source?.media?.input ? "连线的源视频要运行后才有画面：起点在“镜头”页按秒设置，运行后切到“成片”查看。"
+        this.placeholder.textContent = this.shot.source?.media?.input ? `${this.shot.source.media.input} 不是直接接的 LoadVideo，导演台里放不了：起点在“镜头”页按秒设置，运行后切到“成片”查看。`
             : "选择源视频后，这里按时间线显示这一镜用到的素材。";
         if (source.kind === "video" && this.video.dataset.url !== source.url) {
             this.video.dataset.url = source.url;
@@ -224,7 +225,7 @@ class Editor {
     showFrame() {
         const stage = this.stage;
         if (stage?.kind === "storyboard") {
-            const key = this.keyAt(this.frame), url = mediaUrl(key?.media);
+            const key = this.keyAt(this.frame), url = this.preview(key?.media)?.url;
             // Preview the keyframe the way it meets the canvas; "auto" stretches the generation's first frame, crops the rest.
             const mode = key && (key.fit !== "auto" ? key.fit : key.pos + this.win.head === 0 ? "stretch" : "crop");
             this.image.style.objectFit = { crop: "cover", pad: "contain", stretch: "fill" }[mode] || "fill";
@@ -446,7 +447,8 @@ class Editor {
         this.paint = index;
         const layer = this.shot.repaints[index];
         this.fitScreen();
-        await this.painter.loadMask(layer.mask && !layer.mask.input ? mediaUrl(layer.mask) : null);
+        const painted = layer.mask?.input ? layer.mask.file : layer.mask;
+        await this.painter.loadMask(painted ? mediaUrl(painted) : null);
         this.painter.setMode("mask");
         this.renderTabs();
         this.renderInspector();
@@ -702,16 +704,27 @@ class Editor {
         return h("button", { onclick: () => { item.seed = (item.seed || 0) + 1; this.commit(); this.renderInspector(); }, title: "换一个随机结果" }, `🎲 换种子（${item.seed || 0}）`);
     }
 
-    /** Media slot: click to upload, drop a file, pick a graph input, or capture the stage frame. */
-    /** Upload / drop target; ``graph`` lists the socket kinds offered as connected material (e.g. ["video", "image"]). */
+    /** What a media item looks like here: an upload's own file, or what is known about a connected socket. */
+    preview(media) {
+        if (!media) return null;
+        if (media.input) return inputPreview(this.node, media.input);
+        return { url: mediaUrl(media), video: isVideo(media), audio: isAudio(media), name: media.filename };
+    }
+
+    /**
+     * Media slot: click to upload, drop a file, pick connected material or capture the stage frame.
+     * ``graph`` lists the socket kinds offered as connected material (e.g. ["video", "image"]).
+     */
     slot(media, { accept = "image/*", tag, graph = ["image"], capture = false, onpick }) {
-        const url = mediaUrl(media);
-        const el = h(`div.slot${media ? ".filled" : ""}`, { title: media ? mediaLabel(media) : "点击上传，或把文件拖到这里" });
-        if (media && url && isVideo(media)) el.append(h("video", { src: url, muted: true, preload: "metadata" }));
-        else if (media && url && isAudio(media)) el.append(h("span", {}, `♪ ${media.filename}`));
-        else if (url) el.style.backgroundImage = `url("${url}")`;
+        const shown = this.preview(media);
+        const el = h(`div.slot${media ? ".filled" : ""}`, {
+            title: !media ? "点击上传，或把文件拖到这里" : media.input && !shown ? `${media.input}：上游不是加载节点，运行一次后显示画面` : mediaLabel(media) });
+        if (shown?.video) el.append(h("video", { src: shown.url, muted: true, preload: "metadata" }));
+        else if (shown?.audio) el.append(h("span", {}, `♪ ${shown.name}`));
+        else if (shown?.url) el.style.backgroundImage = `url("${shown.url}")`;
         else el.append(h("span", {}, media ? mediaLabel(media) : "+ 上传"));
         if (tag) el.append(h("span.tag", {}, tag));
+        if (media?.input && shown && !shown.audio) el.append(h("span.src", {}, media.input));
         const choose = async file => {
             if (!file) return;
             try { onpick(await upload(file)); } catch (error) { alert(error.message); }
@@ -724,9 +737,12 @@ class Editor {
         const extras = [];
         const inputs = graphInputs(this.node, ...graph);
         if (inputs.length) {
+            // The slot's own file stays on the item while a socket is picked, so switching back restores it.
+            const own = media?.input ? media.file : media;
             extras.push(h("select", {
-                onchange: e => { if (e.target.value) onpick({ input: e.target.value }); },
-            }, h("option", { value: "" }, "连线素材…"), ...inputs.map(i => h("option", { value: i.input, selected: media?.input === i.input }, i.label))));
+                onchange: e => { if (e.target.value) onpick({ input: e.target.value, ...(own && { file: own }) }); else if (own) onpick(own); },
+            }, h("option", { value: "" }, own ? `上传：${own.filename}` : "连线素材…"),
+                ...inputs.map(i => h("option", { value: i.input, selected: media?.input === i.input }, i.label))));
         }
         if (capture) extras.push(h("button", { onclick: async () => { try { onpick(await this.captureFrame()); } catch (error) { alert(error.message); } } }, "截取当前画面"));
         return h("div.field", {}, el, extras.length ? h("div.row", {}, ...extras) : null);
@@ -774,7 +790,7 @@ class Editor {
                 this.slot(shot.source.media, { accept: "video/*", graph: ["video", "image"], onpick: m => { shot.source.media = m; this.commit(true); } }),
                 this.privacy(shot.source)));
             parts.push(this.field("起点（秒）", this.number(shot.source, "start", { min: 0, step: 1 / FPS, scale: FPS, after: () => this.renderStage() })));
-            parts.push(h("div.dim", {}, shot.source.media?.input ? "连线的源视频在运行前看不到画面，按秒设置起点。"
+            parts.push(h("div.dim", {}, shot.source.media?.input && !this.preview(shot.source.media)?.video ? "这个连线源视频不是直接接的 LoadVideo，导演台里放不了，按秒设置起点。"
                 : "剪辑素材：在舞台下方的素材条上拖动选区，选出这一镜用到的那一段；拖选区右缘改时长，或播放到某一帧按 I / O 设入点 / 出点。"));
             parts.push(this.field("改写方式", this.seg([[false, "保留原画 · 只改遮罩"], [true, "整体改写（参考 <Video 1>）"]], shot.source.regen,
                 v => { shot.source.regen = v; this.commit(true); })));
@@ -956,7 +972,7 @@ class Editor {
                     onpick: m => { m ? (v.media = m) : refs.videos.splice(i, 1); this.commit(true); } }),
                 this.check(v, "audio", "带原声", () => this.commit(true)), this.privacy(v),
                 h("div.row", {}, "起点", this.number(v, "start", { min: 0, step: 1 / FPS, scale: FPS, after: () => this.renderStage() }), "秒",
-                    mediaUrl(v.media) ? h("button", { onclick: () => { this.stopTools(); this.trim = { clip: v, tag: `<Video ${offset.videos + i + 1}>` }; this.renderStage(); },
+                    this.preview(v.media)?.video ? h("button", { onclick: () => { this.stopTools(); this.trim = { clip: v, tag: `<Video ${offset.videos + i + 1}>` }; this.renderStage(); },
                         title: "在舞台下方的素材条上选择参考的片段" }, "截取") : null))),
             h("span.dim", {}, `音频 ${refs.audios.length}`),
             list(refs.audios, { accept: "audio/*,video/*", graph: ["audio", "video"] }, (m, i) => this.slot(m, { accept: "audio/*,video/*", graph: ["audio", "video"], tag: "音频",
@@ -984,17 +1000,17 @@ class Editor {
     repaintPane() {
         const shot = this.shot;
         const cards = shot.repaints.map((layer, i) => {
-            const masks = graphInputs(this.node, "mask");
+            const masks = graphInputs(this.node, "mask"), painted = layer.mask?.input ? layer.mask.file : layer.mask, shown = this.preview(layer.mask)?.url;
             return h(`div.card${this.paint === i ? ".active" : ""}`, {},
                 h("header.row", {}, h("b", {}, `重绘 ${i + 1}`), this.check(layer, "enabled", "启用"), h("span.grow"),
                     h("button.danger", { onclick: () => { shot.repaints.splice(i, 1); this.commit(true); } }, "删除")),
                 h("div.row", {},
-                    h("div.slot.filled", { style: { width: "84px", aspectRatio: `${this.project.width}/${this.project.height}`, backgroundImage: layer.mask && !layer.mask.input ? `url("${mediaUrl(layer.mask)}")` : "none" } },
-                        layer.mask ? (layer.mask.input ? mediaLabel(layer.mask) : "") : "无遮罩"),
+                    h("div.slot.filled", { style: { width: "84px", aspectRatio: `${this.project.width}/${this.project.height}`, backgroundImage: shown ? `url("${shown}")` : "none" } },
+                        layer.mask ? (layer.mask.input ? h("span.src", {}, mediaLabel(layer.mask)) : "") : "无遮罩"),
                     h("div.field.grow", {},
-                        h("button.primary", { onclick: () => this.startPaint(i) }, layer.mask && !layer.mask.input ? "编辑遮罩" : "在画面上绘制遮罩"),
-                        masks.length ? h("select", { onchange: e => { layer.mask = e.target.value ? { input: e.target.value } : null; this.commit(true); } },
-                            h("option", { value: "" }, "使用遮罩输入…"), ...masks.map(m => h("option", { value: m.input, selected: layer.mask?.input === m.input }, m.label))) : null)),
+                        h("button.primary", { onclick: () => this.startPaint(i) }, painted ? "编辑遮罩" : "在画面上绘制遮罩"),
+                        masks.length ? h("select", { onchange: e => { layer.mask = e.target.value ? { input: e.target.value, ...(painted && { file: painted }) } : painted || null; this.commit(true); } },
+                            h("option", { value: "" }, painted ? "手绘遮罩" : "使用遮罩输入…"), ...masks.map(m => h("option", { value: m.input, selected: layer.mask?.input === m.input }, m.label))) : null)),
                 this.field("重绘强度（1 = 遮罩内完全重新生成）", this.slider(layer, "strength", 0.05, 1, 0.05)),
                 this.range(layer),
                 this.field("本层提示词（留空沿用镜头提示词）", h("textarea", { rows: 3, value: layer.prompt, oninput: e => { layer.prompt = e.target.value; this.commit(); } })),

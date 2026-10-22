@@ -1,14 +1,17 @@
 from io import BytesIO
+import json
 from pathlib import Path
 import tempfile
 import unittest
 
+from PIL import Image
 import torch
 
 from support import load, write_video
 
 director = load()
 from comfy_api.latest import InputImpl  # noqa: E402
+import folder_paths  # noqa: E402
 
 Media = director.media.Media
 VIDEO = {"input": "video_0"}
@@ -53,6 +56,41 @@ class GraphMediaTests(unittest.TestCase):
         self.assertTrue(torch.equal(clip["waveform"], wave[:, :, 24000:36000]))
         with self.assertRaisesRegex(ValueError, "没有声音"):
             Media(images={"image_0": torch.zeros(1, 8, 8, 3)}).audio({"input": "image_0"}, 0, 1)
+
+
+class InputPreviewTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        write_video(self.root / "clip.mp4", 48, 64, 32)
+        self.saved = folder_paths.get_temp_directory()
+        folder_paths.set_temp_directory(str(self.root / "temp"))
+
+    def tearDown(self):
+        folder_paths.set_temp_directory(self.saved)
+        self.tmp.cleanup()
+
+    def test_connected_pictures_are_saved_once_per_socket(self):
+        image = {"input": "image_0"}
+        shot = {"id": "a", "frames": 30, "prompt": "", "keyframes": [{"at": 0, "media": image}],
+                "refs": {"images": [{"media": image}, {"media": {"input": "image_1"}}], "videos": [{"media": VIDEO}], "audios": [{"input": "audio_0"}]},
+                "repaints": [{"mask": {"input": "mask_0"}}]}
+        spec = director.project.load_project(json.dumps({"shots": [shot]}), {"width": 128, "height": 64})
+        media = Media(images={"image_0": torch.rand(2, 600, 800, 3)}, masks={"mask_0": torch.ones(3, 40, 60)},
+                      videos={"video_0": InputImpl.VideoFromFile(str(self.root / "clip.mp4"))},
+                      audios={"audio_0": {"waveform": torch.zeros(1, 2, 2400), "sample_rate": 24000}})
+        out = director.director._input_previews(spec, media, "7")
+        # image_1 is not connected and audio has no picture.
+        self.assertEqual(sorted(out), ["image_0", "mask_0", "video_0"])
+        self.assertEqual(out["mask_0"], {"filename": "7_mask_0.png", "subfolder": "yogurt_h3/inputs", "type": "temp"})
+        folder = self.root / "temp" / "yogurt_h3" / "inputs"
+        sizes = {}
+        for key in out:
+            with Image.open(folder / out[key]["filename"]) as picture:
+                sizes[key] = picture.size, picture.getpixel((0, 0))
+        self.assertEqual(sizes["image_0"][0], (320, 240))
+        self.assertEqual(sizes["mask_0"], ((60, 40), (255, 255, 255)))
+        self.assertEqual(sizes["video_0"][0], (64, 32))
 
 
 if __name__ == "__main__":

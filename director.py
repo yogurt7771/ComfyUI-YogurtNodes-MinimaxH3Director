@@ -1,8 +1,12 @@
 """Yogurt H3 导演台: one node from the visual timeline to a finished MiniMax H3 video."""
 
 import json
+import os
+
+from PIL import Image
 
 import comfy.samplers
+import folder_paths
 from comfy_api.latest import io
 
 from . import latent_upscale
@@ -13,7 +17,8 @@ from .render import Models, Render, send_event
 from .rewrite import Rewriter, rewrite_project
 
 
-def _files(project):
+def _media(project):
+    """Every media item the project references: uploads and connected sockets."""
     shot_media = []
     for shot in project["shots"]:
         refs = shot["refs"]
@@ -21,7 +26,32 @@ def _files(project):
         shot_media += [v["media"] for v in refs["videos"]] + [layer["mask"] for layer in shot["repaints"]]
         if shot["source"]:
             shot_media.append(shot["source"]["media"])
-    return [m for m in shot_media + [project["soundtrack"]] if m is not None and "input" not in m]
+    return [m for m in shot_media + [project["soundtrack"]] if m is not None]
+
+
+def _input_previews(project, media, node_id):
+    """Small pictures of the connected image / video / mask sockets the project uses, saved to temp for the editor."""
+    folder = os.path.join(folder_paths.get_temp_directory(), "yogurt_h3", "inputs")
+    out = {}
+    for item in _media(project):
+        key = item.get("input")
+        if key is None or key in out or key.startswith("audio_") or key not in media.inputs:
+            continue
+        if key.startswith("video_"):
+            width, height = media.video_size(item)
+            scale = min(1.0, 320 / max(width, height))
+            frame = media.video(item, 0, 1, max(2, round(width * scale)), max(2, round(height * scale)), "disabled")
+        elif key.startswith("mask_"):
+            frame = media.mask(item)[:1, ..., None].expand(-1, -1, -1, 3)
+        else:
+            frame = media.image(item)
+        picture = Image.fromarray((frame[0, ..., :3].clamp(0, 1) * 255).byte().cpu().numpy())
+        picture.thumbnail((320, 320))
+        os.makedirs(folder, exist_ok=True)
+        name = f"{node_id}_{key}.png"
+        picture.save(os.path.join(folder, name))
+        out[key] = {"filename": name, "subfolder": "yogurt_h3/inputs", "type": "temp"}
+    return out
 
 
 class YogurtH3Director(io.ComfyNode):
@@ -105,7 +135,7 @@ class YogurtH3Director(io.ComfyNode):
     def fingerprint_inputs(cls, project, **kwargs):
         # Re-run when an uploaded file is replaced in place under the same name.
         try:
-            files = _files(load_project(project))
+            files = [m for m in _media(load_project(project)) if "input" not in m]
         except ValueError:
             return project
         media = Media()
@@ -133,4 +163,5 @@ class YogurtH3Director(io.ComfyNode):
         timeline = [{"id": w.shot["id"], "start": w.start, "frames": w.keep, "head": w.head, "gen": w.gen} for w in render.windows]
         return io.NodeOutput(video, ui={"images": [saved], "animated": (True,),
                                         "yogurt_h3": [{"timeline": timeline, "report": render.report, "video": saved, "prompts": prompts,
+                                                       "inputs": _input_previews(spec, media, cls.hidden.unique_id),
                                                        "size": [render.out_w, render.out_h]}]})

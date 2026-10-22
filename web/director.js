@@ -190,6 +190,8 @@ app.registerExtension({
                 this.properties = this.properties || {};
                 this.properties.yh3Result = info;
                 if (info.prompts && Object.keys(info.prompts).length) storePrompts(this, info.prompts);
+                // Pictures of the connected sockets this run received, for material the editor cannot open itself.
+                this.properties.yh3Inputs = info.inputs || {};
                 changed();
                 const panel = this.yh3Panel;
                 if (panel) {
