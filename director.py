@@ -12,7 +12,7 @@ from comfy_api.latest import io
 from . import latent_upscale
 from .cache import digest
 from .media import Media
-from .project import DEFAULT_PROJECT, OVERLAPS, REFINE_MODES, REFINE_UPSCALERS, SETTINGS, load_project, plan_windows
+from .project import DEFAULT_PROJECT, OVERLAPS, REFINE_UPSCALERS, SETTINGS, load_project, plan_windows
 from .render import Models, Render, send_event
 from .rewrite import Rewriter, rewrite_project
 
@@ -76,31 +76,36 @@ class YogurtH3Director(io.ComfyNode):
                 io.String.Input("filename_prefix", default="yogurt_h3/director"),
                 io.String.Input("project", multiline=True, default=json.dumps(DEFAULT_PROJECT, ensure_ascii=False),
                                 tooltip="导演台工程，由节点里的时间线编辑器写入。"),
-                io.Int.Input("width", default=SETTINGS["width"], min=64, max=4096, step=32, tooltip="首采画面宽度（32 的倍数）。"),
-                io.Int.Input("height", default=SETTINGS["height"], min=64, max=4096, step=32, tooltip="首采画面高度（32 的倍数）。"),
+                io.Int.Input("width", default=SETTINGS["width"], min=64, max=4096, step=32, tooltip="成片宽度（32 的倍数）；开二采时首采按各遍的放大倍数缩小。"),
+                io.Int.Input("height", default=SETTINGS["height"], min=64, max=4096, step=32, tooltip="成片高度（32 的倍数）；开二采时首采按各遍的放大倍数缩小。"),
                 io.Combo.Input("overlap", options=[str(v) for v in OVERLAPS], default=str(SETTINGS["overlap"]),
                                tooltip="续接重叠帧：勾选“接着上一镜”的镜头从上一镜最后这么多帧接着生成（22 帧约 0.92 秒）；0 关闭续接。"),
                 io.Combo.Input("ref_image_size", options=["match", "max"], default=SETTINGS["ref_image_size"],
                                tooltip="参考图尺寸：match 等比缩到成片的像素量（只缩小不放大）；max 短边最大 2048（更清晰，参考 token 更多，更慢）。"),
                 io.String.Input("negative_prompt", default=SETTINGS["negative_prompt"], tooltip="负面提示词，cfg ≠ 1 时生效。"),
-                io.Combo.Input("refine", options=list(REFINE_MODES), default=SETTINGS["refine"],
-                               tooltip="二采。开启后 width × height 是成片尺寸，首采在它除以 refine_scale 的小画幅上进行。\n"
-                                       "two_pass：首采只跑调度表的前面几步，放大后在成片尺寸跑最后 refine_steps 步（总步数仍是 steps，快）。\n"
-                                       "upscale：首采跑完整个调度表，放大后从 refine_denoise 的噪声再采 refine_steps 步。"),
-                io.Float.Input("refine_scale", default=SETTINGS["refine_scale"], min=1.0, max=4.0, step=0.125,
-                               tooltip="成片相对首采的放大倍数：首采画幅 = width × height ÷ refine_scale。"),
+                io.Boolean.Input("two_pass", default=SETTINGS["two_pass"],
+                                 tooltip="两段式二采：首采在小画幅上只跑调度表前面的步数，放大 two_pass_scale 倍后跑最后 two_pass_steps 步"
+                                         "（总步数仍是 steps，快）。可与低噪重绘同时开，两段式在前。"),
+                io.Float.Input("two_pass_scale", default=SETTINGS["two_pass_scale"], min=1.0, max=4.0, step=0.125,
+                               tooltip="两段式的放大倍数：首采画幅 = 两段式画幅 ÷ two_pass_scale。两段式画幅是成片尺寸，同开低噪重绘时再除以 rerender_scale。"),
+                io.Int.Input("two_pass_steps", default=SETTINGS["two_pass_steps"], min=1, max=200,
+                             tooltip="调度表最后几步在两段式画幅上跑（例如 steps 8、这里 2 = 首采 6 步 + 放大后 2 步）。"),
+                io.Boolean.Input("rerender", default=SETTINGS["rerender"],
+                                 tooltip="低噪重绘：放大 rerender_scale 倍到成片尺寸，从 rerender_denoise 的噪声再采 rerender_steps 步，音轨锁定。\n"
+                                         "单开时接在完整跑完的首采后；和两段式同开时接在两段式之后。"),
+                io.Float.Input("rerender_scale", default=SETTINGS["rerender_scale"], min=1.0, max=4.0, step=0.125,
+                               tooltip="低噪重绘的放大倍数：它的输入画幅 = width × height ÷ rerender_scale；1 = 不放大，在成片尺寸上重采。"),
+                io.Int.Input("rerender_steps", default=SETTINGS["rerender_steps"], min=1, max=200, tooltip="低噪重绘的步数。"),
+                io.Float.Input("rerender_denoise", default=SETTINGS["rerender_denoise"], min=0.05, max=1.0, step=0.05,
+                               tooltip="低噪重绘从多大的噪声开始（1 = 纯噪声），常用 0.25–0.4。"),
                 io.Combo.Input("refine_upscaler", options=list(REFINE_UPSCALERS), default=SETTINGS["refine_upscaler"],
-                               tooltip="首采放大到成片尺寸的方式。\n"
+                               tooltip="两段式和低噪重绘放大画面的方式。\n"
                                        "h3_latent：H3 latent 放大模型直接放大视频 latent，不经过 VAE（快；源视频局部重绘镜头仍走像素）。\n"
                                        "lanczos：VAE 解码 → Lanczos 放大 → VAE 编码。\n"
                                        "model：VAE 解码 → 接入的 upscale_model 放大 → VAE 编码。"),
                 io.Combo.Input("refine_latent_model", options=latent_upscale.choices(), default=SETTINGS["refine_latent_model"],
                                tooltip="h3_latent 用的放大权重（models/latent_upscale_models）。默认权重缺失时，首次使用会从 Hugging Face "
                                        "下载约 690 MB（LBH-123-AI/Minimax_h3_latent_Upscaler，校验 SHA-256；可用 HF_ENDPOINT 换镜像）。"),
-                io.Int.Input("refine_steps", default=SETTINGS["refine_steps"], min=1, max=200,
-                             tooltip="two_pass：调度表最后几步在成片尺寸上跑（例如 steps 8、这里 2 = 首采 6 步 + 二采 2 步）。upscale：二采的步数。"),
-                io.Float.Input("refine_denoise", default=SETTINGS["refine_denoise"], min=0.05, max=1.0, step=0.05,
-                               tooltip="只用于 upscale：二采从多大的噪声开始（1 = 纯噪声），常用 0.25–0.4。two_pass 从首采停下的位置接着采。"),
                 io.Boolean.Input("detail", default=SETTINGS["detail"],
                                  tooltip="局部精修总开关：关掉时跳过所有精修区域。区域在导演台“局部精修”页框选。"),
                 io.Int.Input("detail_steps", default=SETTINGS["detail_steps"], min=1, max=200, tooltip="局部精修步数。"),

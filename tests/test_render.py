@@ -47,7 +47,8 @@ class RenderTests(unittest.TestCase):
         self.tmp.cleanup()
 
     def run_project(self, data, settings=None, media=None, **kwargs):
-        spec = director.project.load_project(json.dumps(data), {"width": 128, "height": 64, **(settings or {})})
+        # The real latent upscaler stays out of unit tests; the h3_latent tests bring a tiny one.
+        spec = director.project.load_project(json.dumps(data), {"width": 128, "height": 64, "refine_upscaler": "lanczos", **(settings or {})})
         job = render.Render("7", {}, spec, models(director, **kwargs), media or director.media.Media(), [11, 6, 1.0, "euler", "simple"])
         self.fake.calls.clear()
         video, saved = job.run("test/out")
@@ -124,7 +125,7 @@ class RenderTests(unittest.TestCase):
 
     def test_two_pass_refine_splits_one_schedule(self):
         shots = [{"id": "a", "frames": 30, "prompt": "一"}, {"id": "b", "frames": 30, "prompt": "二"}]
-        job, path = self.run_project({"shots": shots}, {"refine": "two_pass", "width": 256, "height": 128, "refine_scale": 2.0, "refine_steps": 2})
+        job, path = self.run_project({"shots": shots}, {"two_pass": True, "width": 256, "height": 128, "two_pass_scale": 2.0, "two_pass_steps": 2})
         base_a, base_b, refine_a, refine_b = self.fake.calls
         # 6 steps: the draft runs the first 4 at half size and lands on 0, the last 2 run at the output size.
         self.assertEqual((base_a["shape"][-2:], base_a["sigmas"]), ((4, 8), [1.0, 0.8333, 0.6667, 0.5, 0.0]))
@@ -142,7 +143,7 @@ class RenderTests(unittest.TestCase):
         source = {"media": {"filename": "clip.mp4", "subfolder": "", "type": "input"}, "start": 6}
         shots = [{"id": "s", "kind": "source", "frames": 30, "prompt": "改左边", "source": source,
                   "repaints": [{"mask": mask, "strength": 0.6, "grow": 0, "feather": 0}]}]
-        job, path = self.run_project({"shots": shots}, {"refine": "two_pass", "width": 256, "height": 128, "refine_scale": 2.0, "refine_steps": 2})
+        job, path = self.run_project({"shots": shots}, {"two_pass": True, "width": 256, "height": 128, "two_pass_scale": 2.0, "two_pass_steps": 2})
         repaint, refine = self.fake.calls
         self.assertEqual((repaint["shape"][-2:], repaint["start"]), ((4, 8), 0.6))
         self.assertEqual((refine["shape"][-2:], refine["sigmas"]), ((8, 16), [0.2, 0.1, 0.0]))
@@ -159,7 +160,7 @@ class RenderTests(unittest.TestCase):
         saved = folder_paths.folder_names_and_paths.get("latent_upscale_models")
         folder_paths.folder_names_and_paths["latent_upscale_models"] = ([str(folder)], {".safetensors"})
         shots = [{"id": "a", "frames": 30, "prompt": "一"}, {"id": "b", "frames": 30, "prompt": "二"}]
-        settings = {"refine": "two_pass", "width": 256, "height": 128, "refine_scale": 2.0, "refine_steps": 2,
+        settings = {"two_pass": True, "width": 256, "height": 128, "two_pass_scale": 2.0, "two_pass_steps": 2,
                     "refine_upscaler": "h3_latent", "refine_latent_model": "tiny.safetensors"}
         try:
             job, _ = self.run_project({"shots": shots}, settings)
@@ -181,8 +182,7 @@ class RenderTests(unittest.TestCase):
     def test_two_pass_references_keep_the_output_resolution(self):
         hero = png(self.root / "input" / "hero.png", 200, size=(256, 128))
         shots = [{"id": "a", "frames": 30, "prompt": "一", "refs": {"images": [hero]}}]
-        job, _ = self.run_project({"shots": shots}, {"refine": "two_pass", "width": 256, "height": 128, "refine_scale": 2.0,
-                                                     "refine_steps": 2, "refine_upscaler": "lanczos"})
+        job, _ = self.run_project({"shots": shots}, {"two_pass": True, "width": 256, "height": 128, "two_pass_scale": 2.0, "two_pass_steps": 2})
         base = self.fake.calls[0]
         self.assertEqual((base["shape"][-2:], base["refs"]), ((4, 8), ["image"]))
         # The reference is encoded at the 256x128 output size, not squeezed to the 128x64 draft.
@@ -213,14 +213,14 @@ class RenderTests(unittest.TestCase):
 
     def test_two_pass_shot_without_refine_runs_its_whole_schedule_on_the_draft(self):
         shots = [{"id": "a", "frames": 30, "prompt": "一", "refine": False}]
-        self.run_project({"shots": shots}, {"refine": "two_pass", "width": 256, "height": 128, "refine_scale": 2.0, "refine_steps": 2})
+        self.run_project({"shots": shots}, {"two_pass": True, "width": 256, "height": 128, "two_pass_scale": 2.0, "two_pass_steps": 2})
         (base,) = self.fake.calls
         self.assertEqual((base["shape"][-2:], base["steps"]), ((4, 8), 6))
 
-    def test_upscale_refine_resamples_every_shot_and_carries_the_refined_tail(self):
+    def test_rerender_resamples_every_shot_and_carries_the_refined_tail(self):
         shots = [{"id": "a", "frames": 30, "prompt": "一"}, {"id": "b", "frames": 30, "prompt": "二"}]
-        job, path = self.run_project({"shots": shots}, {"refine": "upscale", "width": 256, "height": 128, "refine_scale": 2.0,
-                                                        "refine_steps": 4, "refine_denoise": 0.5})
+        job, path = self.run_project({"shots": shots}, {"rerender": True, "width": 256, "height": 128, "rerender_scale": 2.0,
+                                                        "rerender_steps": 4, "rerender_denoise": 0.5})
         base, refine_a, refine_b = self.fake.calls[0], self.fake.calls[2], self.fake.calls[3]
         self.assertEqual(base["shape"][-2:], (4, 8))
         self.assertEqual((refine_a["shape"][-2:], refine_a["steps"], refine_a["start"]), ((8, 16), 4, 0.5))
@@ -228,6 +228,70 @@ class RenderTests(unittest.TestCase):
         self.assertEqual(refine_b["audio_mask"].abs().sum().item(), 0.0)
         with av.open(str(path)) as container:
             self.assertEqual((container.streams.video[0].width, container.streams.video[0].height), (256, 128))
+
+    def test_two_pass_and_rerender_run_one_after_the_other(self):
+        shots = [{"id": "a", "frames": 30, "prompt": "一"}, {"id": "b", "frames": 30, "prompt": "二"}]
+        job, path = self.run_project({"shots": shots}, {"two_pass": True, "two_pass_steps": 2, "rerender": True, "rerender_steps": 4,
+                                                        "rerender_denoise": 0.5, "width": 256, "height": 128, "two_pass_scale": 2.0})
+        # Pass by pass: every shot's two-pass, then every shot's rerender.
+        base_a, base_b, tail_a, tail_b, again_a, again_b = self.fake.calls
+        self.assertEqual((base_a["shape"][-2:], base_a["sigmas"]), ((4, 8), [1.0, 0.8333, 0.6667, 0.5, 0.0]))
+        self.assertEqual((tail_a["shape"][-2:], tail_a["sigmas"]), ((8, 16), [0.3333, 0.1667, 0.0]))
+        # The rerender starts from what the tail finished, with its sound locked and noise of its own.
+        self.assertEqual((again_a["shape"][-2:], again_a["steps"], again_a["start"]), ((8, 16), 4, 0.5))
+        self.assertEqual(again_a["audio_mask"].abs().sum().item(), 0.0)
+        self.assertNotEqual(again_a["seed"], tail_a["seed"])
+        # Both passes of the continued shot keep the head the first shot ends on, one drift anchor each.
+        for call in (tail_b, again_b):
+            self.assertEqual(call["video_mask"][0, 0, :7].flatten().tolist(), [0.0] * 7)
+        self.assertEqual(len(self.drift), 3)
+        self.assertEqual(len([line for line in job.report if "两段式二采 128×64 → 256×128" in line or "低噪重绘 256×128" in line]), 4)
+        with av.open(str(path)) as container:
+            self.assertEqual((container.streams.video[0].width, container.streams.video[0].height), (256, 128))
+
+    def test_rerender_at_scale_one_resamples_the_draft_in_place(self):
+        shots = [{"id": "a", "frames": 30, "prompt": "一"}]
+        # A missing latent upscaler would fail the run if the draft were lifted.
+        job, _ = self.run_project({"shots": shots}, {"rerender": True, "rerender_scale": 1.0, "refine_upscaler": "h3_latent",
+                                                     "refine_latent_model": "missing.safetensors"})
+        base, again = self.fake.calls
+        self.assertEqual((base["shape"][-2:], again["shape"][-2:], again["start"]), ((4, 8), (4, 8), 0.35))
+        self.assertEqual(job.m.vae.encoded, [])
+
+    def test_each_pass_lifts_by_its_own_scale_and_caches_on_its_own(self):
+        shots = [{"id": "a", "frames": 30, "prompt": "一"}, {"id": "b", "frames": 30, "prompt": "二"}]
+        settings = {"two_pass": True, "two_pass_scale": 2.0, "two_pass_steps": 2, "rerender": True, "rerender_scale": 2.0,
+                    "rerender_steps": 4, "rerender_denoise": 0.5, "width": 512, "height": 256}
+        job, path = self.run_project({"shots": shots}, settings)
+        # Pass by pass: every shot's two-pass, then every shot's rerender.
+        base_a, base_b, tail_a, tail_b, again_a, again_b = self.fake.calls
+        # 512x256 output: the rerender starts from 256x128, two-pass from the 128x64 draft.
+        self.assertEqual([c["shape"][-2:] for c in (base_a, tail_a, again_a)], [(4, 8), (8, 16), (16, 32)])
+        self.assertEqual((tail_a["sigmas"], again_a["steps"], again_a["start"]), ([0.3333, 0.1667, 0.0], 4, 0.5))
+        # The continued shot carries the first shot's result of the same pass, at that pass's size.
+        for call in (tail_b, again_b):
+            self.assertEqual(call["video_mask"][0, 0, :7].flatten().tolist(), [0.0] * 7)
+        self.assertTrue(any("两段式二采 128×64 → 256×128" in line for line in job.report))
+        self.assertTrue(any("低噪重绘 256×128 → 512×256" in line for line in job.report))
+        with av.open(str(path)) as container:
+            self.assertEqual((container.streams.video[0].width, container.streams.video[0].height), (512, 256))
+        # Changing only the rerender re-runs only the rerender, from the cached two-pass results.
+        self.run_project({"shots": shots}, {**settings, "rerender_denoise": 0.6})
+        self.assertEqual([(c["start"], c["shape"][-2:]) for c in self.fake.calls], [(0.6, (16, 32))] * 2)
+
+    def test_passthrough_source_is_encoded_on_every_pass_canvas_for_the_shot_after_it(self):
+        write_video(self.root / "input" / "clip.mp4", 48, 512, 256, audio_seconds=2)
+        source = {"media": {"filename": "clip.mp4", "subfolder": "", "type": "input"}, "start": 0}
+        shots = [{"id": "s", "kind": "source", "frames": 30, "prompt": "", "source": source},
+                 {"id": "b", "frames": 30, "prompt": "接着", "continue": True}]
+        job, _ = self.run_project({"shots": shots}, {"two_pass": True, "two_pass_scale": 2.0, "rerender": True, "rerender_scale": 2.0,
+                                                     "width": 512, "height": 256})
+        base, tail, again = self.fake.calls
+        self.assertEqual([c["shape"][-2:] for c in (base, tail, again)], [(4, 8), (8, 16), (16, 32)])
+        for call in (base, tail, again):
+            self.assertEqual(call["video_mask"][0, 0, :7].flatten().tolist(), [0.0] * 7)
+        sizes = {shape[1:3] for shape in job.m.vae.encoded}
+        self.assertTrue({(64, 128), (128, 256), (256, 512)} <= sizes)
 
     def test_detail_region_is_resampled_and_stitched(self):
         shots = [{"id": "a", "frames": 30, "prompt": "人物", "details": [{"box": [0.25, 0.25, 0.5, 0.5], "denoise": 0.5,
@@ -284,8 +348,9 @@ class RenderTests(unittest.TestCase):
             out = node.execute(model="model", clip=FakeClip(), vae=FakeVAE(), audio_vae=FakeAudioVAE(), seed=1, steps=4, cfg=1.0, sampler_name="euler",
                                scheduler="simple", filename_prefix="test/node", project=project,
                                videos={"video_0": InputImpl.VideoFromFile(str(self.root / "clip.mp4"))}, audios={"audio_0": None},
-                               width=96, height=64, overlap="22", ref_image_size="match", negative_prompt="", refine="off", refine_scale=2.0,
-                               refine_upscaler="lanczos", refine_steps=2, refine_denoise=0.35, detail=True, detail_steps=8)
+                               width=96, height=64, overlap="22", ref_image_size="match", negative_prompt="", two_pass=False, two_pass_scale=2.0, two_pass_steps=2,
+                               rerender=False, rerender_scale=1.0, rerender_steps=2, rerender_denoise=0.35, refine_upscaler="lanczos",
+                               refine_latent_model="missing.safetensors", detail=True, detail_steps=8)
         finally:
             node.hidden = saved
         info = out.ui["yogurt_h3"][0]

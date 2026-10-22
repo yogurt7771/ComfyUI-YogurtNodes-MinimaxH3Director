@@ -618,20 +618,65 @@
           "link": null
         },
         {
-          "localized_name": "refine",
-          "name": "refine",
+          "localized_name": "two_pass",
+          "name": "two_pass",
           "type": "BOOLEAN",
           "widget": {
-            "name": "refine"
+            "name": "two_pass"
           },
           "link": null
         },
         {
-          "localized_name": "refine_scale",
-          "name": "refine_scale",
+          "localized_name": "two_pass_scale",
+          "name": "two_pass_scale",
           "type": "FLOAT",
           "widget": {
-            "name": "refine_scale"
+            "name": "two_pass_scale"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "two_pass_steps",
+          "name": "two_pass_steps",
+          "type": "INT",
+          "widget": {
+            "name": "two_pass_steps"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "rerender",
+          "name": "rerender",
+          "type": "BOOLEAN",
+          "widget": {
+            "name": "rerender"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "rerender_scale",
+          "name": "rerender_scale",
+          "type": "FLOAT",
+          "widget": {
+            "name": "rerender_scale"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "rerender_steps",
+          "name": "rerender_steps",
+          "type": "INT",
+          "widget": {
+            "name": "rerender_steps"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "rerender_denoise",
+          "name": "rerender_denoise",
+          "type": "FLOAT",
+          "widget": {
+            "name": "rerender_denoise"
           },
           "link": null
         },
@@ -645,20 +690,11 @@
           "link": null
         },
         {
-          "localized_name": "refine_steps",
-          "name": "refine_steps",
-          "type": "INT",
+          "localized_name": "refine_latent_model",
+          "name": "refine_latent_model",
+          "type": "COMBO",
           "widget": {
-            "name": "refine_steps"
-          },
-          "link": null
-        },
-        {
-          "localized_name": "refine_denoise",
-          "name": "refine_denoise",
-          "type": "FLOAT",
-          "widget": {
-            "name": "refine_denoise"
+            "name": "refine_latent_model"
           },
           "link": null
         },
@@ -706,12 +742,15 @@
         "22",
         "match",
         "",
-        "off",
+        false,
         2.0,
-        "h3_latent",
-        "minimax_h3_latent_upscaler_3d_conv_v1_fp16.safetensors",
+        2,
+        false,
+        1.0,
         2,
         0.35,
+        "h3_latent",
+        "minimax_h3_latent_upscaler_3d_conv_v1_fp16.safetensors",
         true,
         3
       ],
@@ -729,12 +768,15 @@
         "overlap": "22",
         "ref_image_size": "match",
         "negative_prompt": "",
-        "refine": "off",
-        "refine_scale": 2.0,
+        "two_pass": false,
+        "two_pass_scale": 2.0,
+        "two_pass_steps": 2,
+        "rerender": false,
+        "rerender_scale": 1.0,
+        "rerender_steps": 2,
+        "rerender_denoise": 0.35,
         "refine_upscaler": "h3_latent",
         "refine_latent_model": "minimax_h3_latent_upscaler_3d_conv_v1_fp16.safetensors",
-        "refine_steps": 2,
-        "refine_denoise": 0.35,
         "detail": true,
         "detail_steps": 3
       }

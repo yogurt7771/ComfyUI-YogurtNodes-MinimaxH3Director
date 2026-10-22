@@ -1,11 +1,11 @@
 """Director render: cache keys and needs first, then encode / sample / decode work grouped by model.
 
 Stages per shot: base (generate, or encode the source video) -> repaint layers -> 二采 refine ->
-decoded frames -> 局部精修 crops -> assembly. With 二采 the base and repaints run on a draft canvas (the output
-divided by the refine scale) and the refine pass brings every shot to the output size: "two_pass" stops the draft
-before the last refine steps of its schedule and runs those steps at full size, "upscale" finishes the draft and
-resamples it from a low noise level. Every stage result is cached under a key over everything
-that affects it, so editing one shot re-runs that shot and the shots continuing from it, nothing else.
+decoded frames -> 局部精修 crops -> assembly. With 二采 the base and repaints run on a draft canvas and each pass that
+is on lifts every shot by its own scale, then samples it there, in this order: two-pass stops the draft before the
+last steps of its schedule and runs those steps on its canvas, the low-noise rerender resamples the result from a low
+noise level; the last pass ends at the output size. Every stage result is cached under a key over everything that
+affects it, so editing one shot re-runs that shot and the shots continuing from it, nothing else.
 """
 
 from dataclasses import dataclass
@@ -83,15 +83,22 @@ class Render:
         self.node_id, self.project, self.m, self.media = node_id, project, models, media
         self.windows = plan_windows(project)
         self.out_w, self.out_h = project["width"], project["height"]
-        self.refine = project["refine"] if project["refine"]["mode"] != "off" else None
-        scale = self.refine["scale"] if self.refine else 1.0
-        self.width, self.height = _round32(self.out_w / scale), _round32(self.out_h / scale)
+        refine = project["refine"]
+        self.passes = [(kind, refine[kind]) for kind in ("two_pass", "rerender") if refine[kind]]
+        self.refine = refine if self.passes else None
+        # canvas[p] is what pass p starts from and canvas[p + 1] what it samples on; canvas[0] is the draft.
+        self.canvas = [(self.out_w, self.out_h)]
+        for _, settings in reversed(self.passes):
+            w, h = self.canvas[0]
+            self.canvas.insert(0, (_round32(w / settings["scale"]), _round32(h / settings["scale"])))
+        self.width, self.height = self.canvas[0]
         signature = lambda names: cache.upstream_signature(prompt, node_id, names)
         base = [VERSION, signature(["model", "ref_model", "clip", "vae", "audio_vae", "sampler", "sigmas"]), settings,
                 self.width, self.height, project["overlap"], project["negative_prompt"], project["ref_image_size"]]
+        lift = self.refine and [signature(["refine_model", "upscale_model"]), self.refine["upscaler"], self.refine["latent_model"],
+                                self.refine["upscaler"] == "h3_latent" and latent_upscale.identity(self.refine["latent_model"])]
         self.env = {"base": digest(base), "inpaint": signature(["inpaint_patch"]),
-                    "refine": digest([base, signature(["refine_model", "upscale_model"]), self.refine, self.out_w, self.out_h,
-                                      self.refine and self.refine["upscaler"] == "h3_latent" and latent_upscale.identity(self.refine["latent_model"])]),
+                    "passes": [digest([base, lift, kind, settings, self.canvas[p], self.canvas[p + 1]]) for p, (kind, settings) in enumerate(self.passes)],
                     "detail": digest([base, signature(["refine_model"]), project["detail"]])}
         self.report = list(report)
         self.final, self.refined, self.conds, self.keyframes, self.detail_conds = {}, {}, {}, {}, {}
@@ -127,8 +134,8 @@ class Render:
         return self.m.ref_model if self.uses_refs(shot) and self.m.ref_model is not None else self.m.model
 
     def tail_steps(self, shot):
-        """Steps of the shot's schedule that two-pass 二采 leaves for the full-size pass (0: the draft runs them all)."""
-        return self.refine["steps"] if self.refine and self.refine["mode"] == "two_pass" and shot["refine"] else 0
+        """Steps of the shot's schedule that two-pass 二采 leaves for its own canvas (0: the draft runs them all)."""
+        return self.refine["two_pass"]["steps"] if self.refine and self.refine["two_pass"] and shot["refine"] else 0
 
     def schedule(self, shot):
         """The shot's own schedule: from noise, from a source video's strength, or for a source edit from its strongest repaint."""
@@ -159,14 +166,19 @@ class Render:
             layers = [digest(["base", self.env["base"], self._spec(window), self.tail_steps(shot), previous and previous["final"]])]
             for layer in shot["repaints"]:
                 layers.append(digest(["repaint", layers[-1], {**layer, "mask": self.media.identity(layer["mask"])}, self.env["inpaint"]]))
-            if self.passthrough(shot):
-                source = shot["source"]
-                refined = digest(["source", self.media.identity(source["media"]), source["start"], window.gen, self.out_w, self.out_h])
-            else:
-                refined = digest(["refine", layers[-1], self.env["refine"], shot["refine"], previous and previous["refined"]])
-            frames = digest(["frames", refined if self.refine or self.passthrough(shot) else layers[-1], window.head, window.keep])
+            source = shot["source"]
+            encoded = lambda size: digest(["source", self.media.identity(source["media"]), source["start"], window.gen, *size])
+            passes = []
+            for p in range(len(self.passes)):
+                if self.passthrough(shot):
+                    passes.append(encoded(self.canvas[p + 1]))
+                else:
+                    passes.append(digest(["refine", passes[-1] if passes else layers[-1], self.env["passes"][p], shot["refine"],
+                                          previous and previous["passes"][p]]))
+            refined = passes[-1] if passes else encoded(self.canvas[0]) if self.passthrough(shot) else layers[-1]
+            frames = digest(["frames", refined, window.head, window.keep])
             details = [digest(["detail", frames, item, self.env["detail"]]) for item in shot["details"]]
-            self.keys.append({"layers": layers, "final": layers[-1], "refined": refined, "frames": frames, "details": details})
+            self.keys.append({"layers": layers, "final": layers[-1], "passes": passes, "refined": refined, "frames": frames, "details": details})
 
         # Backward pass: a shot's latent is needed for its own output or for the tail the next shot copies.
         n = len(self.windows)
@@ -176,13 +188,17 @@ class Render:
             following = self.need[i + 1] if i + 1 < n and self.windows[i + 1].carry else {}
             passthrough = self.passthrough(shot)
             frames = not cache.exists(keys["frames"], ".mkv")
-            refine = self.refine is not None and not cache.exists(keys["refined"]) and (
-                (frames and not passthrough) or following.get("refine", False))
-            final = ((frames and self.refine is None and not passthrough) or (refine and not passthrough)
+            # Each pass feeds the next one of the same shot (a passthrough encodes its source instead) and the same
+            # pass of a shot continuing from it.
+            passes = [False] * len(self.passes)
+            for p in reversed(range(len(self.passes))):
+                wanted = (passes[p + 1] if p + 1 < len(passes) else frames) and not passthrough
+                passes[p] = not cache.exists(keys["passes"][p]) and (wanted or bool(following) and following["passes"][p])
+            final = ((frames and not passes and not passthrough) or (passes and passes[0] and not passthrough)
                      or following.get("base", False))
             last = len(keys["layers"]) - 1
             resume = max((j for j, key in enumerate(keys["layers"]) if cache.exists(key)), default=-1) if final else last
-            self.need[i] = {"frames": frames, "refine": refine, "final": final, "resume": resume,
+            self.need[i] = {"frames": frames, "passes": passes, "refine": any(passes), "final": final, "resume": resume,
                             "repaint": final and resume < last, "base": final and resume < 0,
                             "details": [not cache.exists(key, ".mkv") for key in keys["details"]]}
 
@@ -325,82 +341,96 @@ class Render:
         seed = self.seed(shot["id"], shot["seed"], layer["id"], layer["seed"])
         return {"samples": sampling.sample(model, positive, negative, m.cfg, m.sampler, sigmas, masked, seed)}
 
-    def upscale(self, frames):
+    def upscale(self, frames, width, height):
         out = []
         for start in range(0, frames.shape[0], 8):
             chunk = frames[start:start + 8]
             if self.refine["upscaler"] == "model" and self.m.upscale_model is not None:
                 chunk = ImageUpscaleWithModel.execute(self.m.upscale_model, chunk).result[0].float().cpu()
-            out.append(fit(chunk, self.out_w, self.out_h))
+            out.append(fit(chunk, width, height))
         return torch.cat(out)
 
     def refine_shots(self):
-        """Bring every shot to the output size first (learned latent upscaler, or VAE decode / upscale / encode),
-        then run the full-size pass (UNET)."""
-        if self.refine is None:
-            return
+        results = self.final
+        for p in range(len(self.passes)):
+            results = self.refine_pass(p, results)
+        self.refined = results
+
+    def refine_pass(self, p, inputs):
+        """Lift every shot that takes pass ``p`` to its canvas first (learned latent upscaler, or VAE decode / upscale /
+        encode), then sample them in order (UNET). ``inputs`` holds the previous stage's latents of this run; the
+        returned results are what the next pass and the decoder read."""
+        kind, settings = self.passes[p]
+        (w0, h0), (w1, h1) = self.canvas[p], self.canvas[p + 1]
         prepared, lift = {}, None
         for i, window in enumerate(self.windows):
-            if not self.need[i]["refine"]:
+            if not self.need[i]["passes"][p]:
                 continue
             comfy.model_management.throw_exception_if_processing_interrupted()
             self.event(i, "upscaling")
             shot, mask, keyframes = window.shot, None, None
             if self.passthrough(shot):
-                video = self.m.vae.encode(self.source_frames(window, self.out_w, self.out_h))
+                video = self.m.vae.encode(self.source_frames(window, w1, h1))
                 audio = torch.zeros((1, 32, 2, temporal_shape(window.gen)[2]))
             else:
-                video, audio = sampling.streams(self.final[i])
-                if self.refine["upscaler"] == "h3_latent" and not self.edits_source(shot):
+                latent = inputs[i] if i in inputs else _latent(cache.read_tensors(self.keys[i]["passes"][p - 1]))
+                video, audio = sampling.streams(latent)
+                # Scale 1 keeps the canvas; only source edits still go through their pixels.
+                at_size = (w0, h0) == (w1, h1)
+                if self.refine["upscaler"] == "h3_latent" and not self.edits_source(shot) and not at_size:
                     lift = lift or latent_upscale.load(self.refine["latent_model"])
-                    video = latent_upscale.upscale(lift, video, self.out_h // 16, self.out_w // 16)
-                else:
+                    video = latent_upscale.upscale(lift, video, h1 // 16, w1 // 16)
+                elif self.edits_source(shot) or not at_size:
                     # Source edits are composited with the source pixels, so they always take the pixel path.
-                    frames = self.upscale(_decode(self.m.vae, video))
+                    frames = self.upscale(_decode(self.m.vae, video), w1, h1)
                     if self.edits_source(shot):
-                        frames = torch.lerp(self.source_frames(window, self.out_w, self.out_h), frames,
-                                            self.composite_mask(window, self.out_w, self.out_h)[..., None])
-                        pixels = torch.stack([self.repaint_pixels(window, layer, self.out_w, self.out_h) for layer in shot["repaints"]])
+                        frames = torch.lerp(self.source_frames(window, w1, h1), frames, self.composite_mask(window, w1, h1)[..., None])
+                        pixels = torch.stack([self.repaint_pixels(window, layer, w1, h1) for layer in shot["repaints"]])
                         mask = sampling.token_mask(pixels.amax(0), video.shape[2])
                     video = self.m.vae.encode(frames)
                 if i in self.conds:
-                    keyframes = encode_keyframes(self.conds[i].keyframe_images, self.m.vae, self.out_w, self.out_h)
+                    keyframes = encode_keyframes(self.conds[i].keyframe_images, self.m.vae, w1, h1)
             prepared[i] = (video.to(comfy.model_management.intermediate_device()), audio, mask, keyframes)
 
+        out = {}
         for i, window in enumerate(self.windows):
-            following = i + 1 < len(self.windows) and self.windows[i + 1].carry and self.need[i + 1]["refine"]
+            following = i + 1 < len(self.windows) and self.windows[i + 1].carry and self.need[i + 1]["passes"][p]
             if i not in prepared:
                 if following:
-                    self.refined[i] = _latent(cache.read_tensors(self.keys[i]["refined"]))
+                    out[i] = _latent(cache.read_tensors(self.keys[i]["passes"][p]))
                 continue
             shot, m = window.shot, self.m
             video, audio, mask, keyframes = prepared.pop(i)
             latent = sampling.av_latent(video, audio)
             if shot["refine"] and not self.passthrough(shot):
                 comfy.model_management.throw_exception_if_processing_interrupted()
-                self.event(i, "refining")
                 model = m.refine_model if m.refine_model is not None else self.shot_model(shot)
-                audio_noise = None
-                if self.refine["mode"] == "two_pass":
+                if kind == "two_pass":
+                    self.event(i, "refining")
+                    name, sigmas = "两段式二采", sampling.split(self.schedule(shot), settings["steps"])[1]
                     # The draft stopped early, so generated sound takes the last steps too, on the path it was already on.
-                    sigmas = sampling.split(self.schedule(shot), self.refine["steps"])[1]
                     free_audio = self.audio_mode(shot) == "generate"
-                    audio_noise = self.audio_noise.get(i)
+                    audio_noise = self.audio_noise.get(i) if free_audio else None
                     if free_audio and audio_noise is None:
                         self.report.append(f"第 {i + 1} 镜：首采没有留下声音的噪声（采样器未回报或旧缓存），二采声音重新加噪")
+                    seed = self.seed(shot["id"], shot["seed"])
                 else:
-                    sigmas = sampling.schedule(model, self.refine["steps"], m.scheduler, self.refine["denoise"])
-                    free_audio = False
+                    self.event(i, "rerendering")
+                    name, sigmas = "低噪重绘", sampling.schedule(model, settings["steps"], m.scheduler, settings["denoise"])
+                    free_audio, audio_noise = False, None
+                    # Its own seed: after two-pass the shot's seed would add back the exact noise the tail started from.
+                    seed = self.seed(shot["id"], shot["seed"], "rerender")
                 latent = sampling.av_latent(video, audio, mask, None if free_audio else sampling.locked_audio_mask(audio))
                 if window.carry:
-                    latent, tokens = carry_latent_tail(latent, self.refined[i - 1], window.head, continue_audio=free_audio)
+                    latent, tokens = carry_latent_tail(latent, out[i - 1], window.head, continue_audio=free_audio)
                     model = install_drift_control(model, latent, sigmas, tokens)
                 positive, negative = self.conds[i].conds(shot["prompt"], keyframes)
-                latent = {"samples": sampling.sample(model, positive, negative, m.cfg, m.sampler, sigmas, latent, self.seed(shot["id"], shot["seed"]),
-                                                     audio_noise=audio_noise if free_audio else None)}
-                self.report.append(f"第 {i + 1} 镜：二采 {self.width}×{self.height} → {self.out_w}×{self.out_h}（{sigmas.shape[-1] - 1} 步，从 {float(sigmas[0]):.2f} 起）")
-            _store(self.keys[i]["refined"], latent)
-            self.refined[i] = latent
+                latent = {"samples": sampling.sample(model, positive, negative, m.cfg, m.sampler, sigmas, latent, seed, audio_noise=audio_noise)}
+                size = f"{w1}×{h1}" if (w0, h0) == (w1, h1) else f"{w0}×{h0} → {w1}×{h1}"
+                self.report.append(f"第 {i + 1} 镜：{name} {size}（{sigmas.shape[-1] - 1} 步，从 {float(sigmas[0]):.2f} 起）")
+            _store(self.keys[i]["passes"][p], latent)
+            out[i] = latent
+        return out
 
     def decode_shots(self):
         for i, window in enumerate(self.windows):

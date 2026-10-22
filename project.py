@@ -16,7 +16,6 @@ FPS = 24
 OVERLAPS = (0, 5, 22, 39, 56)
 MEDIA_TYPES = ("input", "output", "temp")
 AUDIO_MODES = ("generate", "soundtrack", "source", "silent")
-REFINE_MODES = ("off", "two_pass", "upscale")
 REFINE_UPSCALERS = ("h3_latent", "lanczos", "model")
 # How an image meets the canvas; "auto" is the native H3 rule (references keep their aspect, the first keyframe
 # stretches, later keyframes cover-crop).
@@ -38,12 +37,15 @@ SETTINGS = {
     "overlap": 22,
     "ref_image_size": "match",
     "negative_prompt": "",
-    "refine": "off",
-    "refine_scale": 2.0,
+    "two_pass": False,
+    "two_pass_scale": 2.0,
+    "two_pass_steps": 2,
+    "rerender": False,
+    "rerender_scale": 1.0,
+    "rerender_steps": 2,
+    "rerender_denoise": 0.35,
     "refine_upscaler": "h3_latent",
     "refine_latent_model": LATENT_UPSCALER,
-    "refine_steps": 2,
-    "refine_denoise": 0.35,
     "detail": True,
     "detail_steps": 8,
 }
@@ -210,10 +212,13 @@ def load_project(text, settings=None):
         "refs": _refs(data.get("refs")),
         "story": str(data.get("story") or ""),
         "rewrite": {"enabled": bool(rewrite["enabled"]), "notes": str(rewrite["notes"] or ""), "seed": _int(rewrite["seed"], 0, 0, 2**31)},
-        "refine": {"mode": s["refine"] if s["refine"] in REFINE_MODES else "off", "scale": _float(s["refine_scale"], 2.0, 1.0, 4.0),
+        # 二采 passes, either or both; each lifts the canvas by its own scale and the last one ends at width x height.
+        "refine": {"two_pass": {"scale": _float(s["two_pass_scale"], 2.0, 1.0, 4.0), "steps": _int(s["two_pass_steps"], 2, 1, 200)}
+                   if s["two_pass"] else None,
+                   "rerender": {"scale": _float(s["rerender_scale"], 1.0, 1.0, 4.0), "steps": _int(s["rerender_steps"], 2, 1, 200),
+                                "denoise": _float(s["rerender_denoise"], 0.35, 0.05, 1.0)} if s["rerender"] else None,
                    "upscaler": s["refine_upscaler"] if s["refine_upscaler"] in REFINE_UPSCALERS else "lanczos",
-                   "latent_model": str(s["refine_latent_model"] or LATENT_UPSCALER),
-                   "steps": _int(s["refine_steps"], 2, 1, 200), "denoise": _float(s["refine_denoise"], 0.35, 0.05, 1.0)},
+                   "latent_model": str(s["refine_latent_model"] or LATENT_UPSCALER)},
         "detail": {"steps": _int(s["detail_steps"], 8, 1, 200)},
     }
     project["shots"] = [_shot(raw, i, project["refs"]) for i, raw in enumerate(data.get("shots") or []) if isinstance(raw, dict)]

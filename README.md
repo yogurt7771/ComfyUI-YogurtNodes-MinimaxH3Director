@@ -14,7 +14,7 @@
 | 源视频改写 | 源视频镜头：在舞台下方的素材条上拖动选区，从长素材里截出这一镜用的那一段（拖选区右缘改时长，或按 I / O 设入点 / 出点）。“保留原画”只改遮罩区，遮罩外像素原样输出；“整体改写”把源片段作为 `<Video 1>` 参考重新生成，可设改写强度（低于 1 时从源画面加噪起步） |
 | 局部重绘 | 在画面上画遮罩（画笔 / 橡皮 / 矩形 / 反选），设帧范围、强度和单独提示词；遮罩外 latent 保持不动，可叠多层。接了 `inpaint_patch`（Fun ControlNet）时遮罩区更贴合周围画面，适合修补和去除；要在遮罩里加入新物体，不接时更听提示词。也可用 `masks` 输入接入逐帧遮罩（如 SAM 跟踪） |
 | 镜头续接 | 勾选“接着上一镜”时，上一镜 AV latent 的最后 22 帧（节点参数 `overlap`，可选 5/39/56）拷入本镜开头并逐步释放（Drift-Control），画面和声音连续，重叠部分只输出一次 |
-| 二采 | 开启后 `width` × `height` 是成片尺寸，首采（含局部重绘）在除以 `refine_scale` 的小画幅上进行，再放大到成片尺寸采样。放大方式 `refine_upscaler`：`h3_latent`（默认）用 H3 latent 放大模型直接放大视频 latent，不经过 VAE；`lanczos` / `model` 走 VAE 解码 → Lanczos 或放大模型 → VAE 编码（源视频局部重绘镜头要和源像素合成，总是走这条）。`two_pass`（两段式）：首采只跑调度表前面的步数，最后 `refine_steps` 步在成片尺寸上接着跑，总步数不变（如 8 = 6 + 2）；生成的声音沿首采时自己的噪声轨迹继续跑完，不重新加噪；`upscale`（放大重采）：首采跑完整个调度表，再从 `refine_denoise` 的噪声采 `refine_steps` 步，音轨锁定。续接镜头使用上一镜二采后的 latent 尾部 |
+| 二采 | 开启后 `width` × `height` 是成片尺寸。两段式和低噪重绘可单开，也可同时开（先两段式、再低噪重绘），每一遍按自己的倍数放大后采样，首采（含局部重绘）在逐遍缩小后的小画幅上进行：例如 1344×768、`two_pass_scale` 2、`rerender_scale` 1.5 时是首采 448×256 → 两段式 896×512 → 低噪重绘 1344×768。放大方式 `refine_upscaler`：`h3_latent`（默认）用 H3 latent 放大模型直接放大视频 latent，不经过 VAE；`lanczos` / `model` 走 VAE 解码 → Lanczos 或放大模型 → VAE 编码（源视频局部重绘镜头要和源像素合成，总是走这条）。`two_pass`（两段式）：首采只跑调度表前面的步数，放大 `two_pass_scale` 倍后跑最后 `two_pass_steps` 步，总步数不变（如 8 = 6 + 2）；生成的声音沿首采时自己的噪声轨迹继续跑完，不重新加噪。`rerender`（低噪重绘）：放大 `rerender_scale` 倍到成片尺寸，从 `rerender_denoise` 的噪声再采 `rerender_steps` 步，音轨锁定；单开时接在跑完整个调度表的首采后，`rerender_scale` 为 1（默认）时不放大、直接在成片尺寸上重采。两遍各自缓存，只改低噪重绘的设置时不重跑两段式。续接镜头每一遍都接上一镜同一遍的 latent 尾部 |
 | 局部精修 | 先运行一次，在“局部精修”页“+ 新建精修区域”，在成片上框出区域（固定或跟随人脸），再运行：裁剪放大到设定像素量后低强度重采样，颜色匹配后羽化贴回，镜头本身读缓存。节点参数 `detail` 是总开关 |
 | 声音 | 每镜可选：模型生成 / 配乐音轨（按时间线切分并锁定，口型跟随，成片保留原波形；在“镜头”页声音旁选择配乐，全片共用）/ 源视频原声（锁定）/ 静音 |
 | 只重跑改动 | 每个阶段按内容缓存。改一个镜头只重跑它和接着它续拍的镜头；“换种子”重新抽这一镜或这一层 |
@@ -34,11 +34,11 @@
 | `sampler` / `sigmas` | 可选，替换 `sampler_name` / `steps`+`scheduler`（如 Turbo 采样器、ManualSigmas）；局部重绘按强度截取噪声表尾部 |
 | `images` / `masks` / `videos` / `audios` | 可选，自动增长的图像 / 遮罩 / 视频（LoadVideo 等）/ 音频（LoadAudio 等）输入。编辑器里的素材位除了上传，也能在“连线素材…”里选对应类型的输入：图片位选图输入；视频位（源视频、参考视频）选视频输入或图像序列；音频位（参考音频、配乐）选音频输入或视频的原声。连线的源视频在运行前不能在舞台上预览 |
 
-节点参数里是全片的渲染设置：`width` / `height`（成片画幅，32 的倍数；开二采时首采画幅再除以 `refine_scale`）、`overlap`（续接重叠帧）、`ref_image_size`（参考图尺寸）、`negative_prompt`、`refine`（二采：`off` / `two_pass` / `upscale`）与 `refine_scale` / `refine_upscaler` / `refine_latent_model` / `refine_steps` / `refine_denoise`、`detail`（局部精修总开关）与 `detail_steps`。导演台只管镜头、参考、声音和剧本。
+节点参数里是全片的渲染设置：`width` / `height`（成片画幅，32 的倍数；开二采时首采按各遍倍数缩小）、`overlap`（续接重叠帧）、`ref_image_size`（参考图尺寸）、`negative_prompt`、二采开关 `two_pass`（与 `two_pass_scale` / `two_pass_steps`）和 `rerender`（与 `rerender_scale` / `rerender_steps` / `rerender_denoise`），两者共用放大方式 `refine_upscaler` / `refine_latent_model`、`detail`（局部精修总开关）与 `detail_steps`。导演台只管镜头、参考、声音和剧本。
 
 `seed` 默认固定：固定种子才能复用已生成的镜头。H3 是蒸馏模型，`cfg` 通常保持 1；大于 1 时使用 `negative_prompt`。
 
-重绘强度、二采强度、精修强度和源视频改写强度都表示这一遍从多大的噪声开始（1 = 纯噪声）。步数保持设定值，噪声表按调度器在该噪声以下排布。H3 的 shift 为 12，按步数比例截取（BasicScheduler 的 denoise）会让 0.35 实际从 0.87 的噪声开始，几乎等于重新生成，所以这里不用那种算法。`upscale` 二采常用 0.25–0.4，精修 0.3–0.45。`two_pass` 不用强度，从首采停下的噪声接着采：8 步、shift 6 时末 2 步约从 0.67 开始，shift 12 时约从 0.8 开始；起点越高越能补细节，也越可能改动长相，可减少 `refine_steps` 降低起点。
+重绘强度、低噪重绘强度、精修强度和源视频改写强度都表示这一遍从多大的噪声开始（1 = 纯噪声）。步数保持设定值，噪声表按调度器在该噪声以下排布。H3 的 shift 为 12，按步数比例截取（BasicScheduler 的 denoise）会让 0.35 实际从 0.87 的噪声开始，几乎等于重新生成，所以这里不用那种算法。低噪重绘常用 0.25–0.4，精修 0.3–0.45。`two_pass` 不用强度，从首采停下的噪声接着采：8 步、shift 6 时末 2 步约从 0.67 开始，shift 12 时约从 0.8 开始；起点越高越能补细节，也越可能改动长相，可减少 `two_pass_steps` 降低起点。
 
 H3 latent 放大模型（[LBH-123-AI/Minimax_h3_latent_Upscaler](https://huggingface.co/LBH-123-AI/Minimax_h3_latent_Upscaler)，约 690 MB）放在 `models/latent_upscale_models/`；`refine_latent_model` 选默认文件而本地没有时，第一次用 `h3_latent` 二采会自动下载到这里（固定版本、校验 SHA-256；设置环境变量 `HF_ENDPOINT` 可走镜像）。
 
@@ -92,7 +92,7 @@ python -m pip install deepagents --no-deps
 计划与缓存检查（只做需要的）
 → 文本与参考编码（CLIP + VAE）
 → 逐镜首采 / 编码源视频，局部重绘层（UNET，续接按顺序）
-→ 二采：全部解码放大编码（VAE）→ 全部在成片尺寸上采样（UNET；two_pass 跑调度表的最后几步）
+→ 二采，逐遍：全部放大到这一遍的画幅（latent 放大模型，或 VAE 解码放大编码）→ 全部采样（UNET；两段式跑调度表的最后几步，低噪重绘从低噪声再采一遍）
 → 逐镜解码、源视频合成（VAE）
 → 局部精修：全部裁剪编码 → 全部采样 → 全部解码
 → 拼接成 MP4（H.264 + AAC）

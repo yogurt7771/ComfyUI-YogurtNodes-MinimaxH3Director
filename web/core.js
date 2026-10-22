@@ -5,7 +5,7 @@ import { api } from "../../scripts/api.js";
 export const FPS = 24;
 export const NODE = "YogurtH3Director";
 export const STAGES = {
-    encoding: "编码条件", sampling: "生成中", repainting: "重绘中", upscaling: "放大中", refining: "二采中",
+    encoding: "编码条件", sampling: "生成中", repainting: "重绘中", upscaling: "放大中", refining: "二采中", rerendering: "低噪重绘中",
     decoding: "解码中", detailing: "精修中", rewriting: "改写提示词", rewritten: "已改写", complete: "完成",
 };
 
@@ -84,7 +84,8 @@ export function readProject(node) {
     try { project = normalize(JSON.parse(widget(node, "project")?.value || "{}")); } catch { project = newProject(); }
     const value = name => widget(node, name)?.value;
     return { ...project, width: value("width"), height: value("height"), overlap: Number(value("overlap")),
-        refine: { enabled: ["two_pass", "upscale"].includes(value("refine")), mode: value("refine"), scale: value("refine_scale") },
+        refine: { enabled: Boolean(value("two_pass") || value("rerender")), twoPass: value("two_pass") && value("two_pass_scale"),
+            rerender: value("rerender") && value("rerender_scale") },
         detail: { enabled: value("detail") } };
 }
 
