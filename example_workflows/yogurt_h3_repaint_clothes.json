@@ -1,0 +1,1012 @@
+{
+  "id": "d9ceadae-4923-4144-9469-db7206e25bf0",
+  "revision": 0,
+  "last_node_id": 15,
+  "last_link_id": 14,
+  "nodes": [
+    {
+      "id": 1,
+      "type": "MarkdownNote",
+      "pos": [
+        40,
+        -580
+      ],
+      "size": [
+        440,
+        520
+      ],
+      "flags": {},
+      "order": 0,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [],
+      "title": "使用说明",
+      "properties": {},
+      "widgets_values": [
+        "## 视频换衣：改成红色吊带\n1. **你的视频** 节点选要改的视频；**SAM 3** 节点选 SAM 3 检查点（如 sam3.1_multiplex_fp16.safetensors）；其余按本机模型选择，CLIP 的 type 必须是 **minimax**。\n2. 点导演台的 **打开导演台**：\n   - 在舞台下方的素材条上拖选区，截出要改的那一段（默认从 0 秒起取 5 秒）；\n   - **局部重绘** 页的重绘层用 **文字识别** 找衣服（目标 `shirt, jacket`），点 **识别预览** 看遮罩是否框住了衣服。\n3. 点 **▶ 运行**。遮罩外的画面和原声原样保留，只重绘衣服。成片保存到 `output/yogurt_h3/`。\n\n**调整**\n- 换成别的衣服：改重绘层的提示词。\n- 原来穿的是裙子：识别目标写 `dress`；没识别到就调低识别阈值。\n- 新衣服边缘有旧衣服残留：调大 **遮罩扩展**；重绘强度保持 1 才能换掉款式。\n- 竖屏视频：把导演台的 width / height 改成 768 / 1344。\n- 视频没有声音：在“镜头”页把声音改成 **静音**。\n- 想让新衣服更贴合原来的光线和褶皱，可接 Fun ControlNet 到 `inpaint_patch`，但款式变化会变小。\n\n**Turbo 8 步（默认开启）**：fl2va 分支用 lightx2v 768p v1.1 加速 LoRA，经 ModelSamplingMiniMaxH3（shift 6 / 3）；导演台 steps 8、euler、simple、cfg 1。不用加速时旁路 LoRA 和 shift 节点，steps 改 25、采样器 res_multistep。"
+      ],
+      "widgets_values_named": {
+        "text": "## 视频换衣：改成红色吊带\n1. **你的视频** 节点选要改的视频；**SAM 3** 节点选 SAM 3 检查点（如 sam3.1_multiplex_fp16.safetensors）；其余按本机模型选择，CLIP 的 type 必须是 **minimax**。\n2. 点导演台的 **打开导演台**：\n   - 在舞台下方的素材条上拖选区，截出要改的那一段（默认从 0 秒起取 5 秒）；\n   - **局部重绘** 页的重绘层用 **文字识别** 找衣服（目标 `shirt, jacket`），点 **识别预览** 看遮罩是否框住了衣服。\n3. 点 **▶ 运行**。遮罩外的画面和原声原样保留，只重绘衣服。成片保存到 `output/yogurt_h3/`。\n\n**调整**\n- 换成别的衣服：改重绘层的提示词。\n- 原来穿的是裙子：识别目标写 `dress`；没识别到就调低识别阈值。\n- 新衣服边缘有旧衣服残留：调大 **遮罩扩展**；重绘强度保持 1 才能换掉款式。\n- 竖屏视频：把导演台的 width / height 改成 768 / 1344。\n- 视频没有声音：在“镜头”页把声音改成 **静音**。\n- 想让新衣服更贴合原来的光线和褶皱，可接 Fun ControlNet 到 `inpaint_patch`，但款式变化会变小。\n\n**Turbo 8 步（默认开启）**：fl2va 分支用 lightx2v 768p v1.1 加速 LoRA，经 ModelSamplingMiniMaxH3（shift 6 / 3）；导演台 steps 8、euler、simple、cfg 1。不用加速时旁路 LoRA 和 shift 节点，steps 改 25、采样器 res_multistep。"
+      },
+      "color": "#432",
+      "bgcolor": "#653"
+    },
+    {
+      "id": 2,
+      "type": "UNETLoader",
+      "pos": [
+        40,
+        0
+      ],
+      "size": [
+        270,
+        82
+      ],
+      "flags": {},
+      "order": 1,
+      "mode": 0,
+      "inputs": [
+        {
+          "localized_name": "unet_name",
+          "name": "unet_name",
+          "type": "COMBO",
+          "widget": {
+            "name": "unet_name"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "weight_dtype",
+          "name": "weight_dtype",
+          "type": "COMBO",
+          "widget": {
+            "name": "weight_dtype"
+          },
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "localized_name": "MODEL",
+          "name": "MODEL",
+          "type": "MODEL",
+          "links": [
+            7
+          ]
+        }
+      ],
+      "title": "H3 fl2va（文生 / 首尾帧 / 重绘）",
+      "properties": {
+        "Node name for S&R": "UNETLoader"
+      },
+      "widgets_values": [
+        "minimax_h3_fl2va_pruned_int8_convrot.safetensors",
+        "default"
+      ],
+      "widgets_values_named": {
+        "unet_name": "minimax_h3_fl2va_pruned_int8_convrot.safetensors",
+        "weight_dtype": "default"
+      }
+    },
+    {
+      "id": 4,
+      "type": "CLIPLoader",
+      "pos": [
+        40,
+        300
+      ],
+      "size": [
+        270,
+        106
+      ],
+      "flags": {},
+      "order": 2,
+      "mode": 0,
+      "inputs": [
+        {
+          "localized_name": "clip_name",
+          "name": "clip_name",
+          "type": "COMBO",
+          "widget": {
+            "name": "clip_name"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "type",
+          "name": "type",
+          "type": "COMBO",
+          "widget": {
+            "name": "type"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "device",
+          "name": "device",
+          "shape": 7,
+          "type": "COMBO",
+          "widget": {
+            "name": "device"
+          },
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "localized_name": "CLIP",
+          "name": "CLIP",
+          "type": "CLIP",
+          "links": [
+            2
+          ]
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "CLIPLoader"
+      },
+      "widgets_values": [
+        "qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors",
+        "minimax",
+        "default"
+      ],
+      "widgets_values_named": {
+        "clip_name": "qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors",
+        "type": "minimax",
+        "device": "default"
+      }
+    },
+    {
+      "id": 5,
+      "type": "VAELoader",
+      "pos": [
+        40,
+        470
+      ],
+      "size": [
+        270,
+        58
+      ],
+      "flags": {},
+      "order": 3,
+      "mode": 0,
+      "inputs": [
+        {
+          "localized_name": "vae_name",
+          "name": "vae_name",
+          "type": "COMBO",
+          "widget": {
+            "name": "vae_name"
+          },
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "localized_name": "VAE",
+          "name": "VAE",
+          "type": "VAE",
+          "links": [
+            3
+          ]
+        }
+      ],
+      "title": "H3 视频 VAE",
+      "properties": {
+        "Node name for S&R": "VAELoader"
+      },
+      "widgets_values": [
+        "minimax_h3_video_vae_fp16.safetensors"
+      ],
+      "widgets_values_named": {
+        "vae_name": "minimax_h3_video_vae_fp16.safetensors"
+      }
+    },
+    {
+      "id": 6,
+      "type": "VAELoader",
+      "pos": [
+        40,
+        580
+      ],
+      "size": [
+        270,
+        58
+      ],
+      "flags": {},
+      "order": 4,
+      "mode": 0,
+      "inputs": [
+        {
+          "localized_name": "vae_name",
+          "name": "vae_name",
+          "type": "COMBO",
+          "widget": {
+            "name": "vae_name"
+          },
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "localized_name": "VAE",
+          "name": "VAE",
+          "type": "VAE",
+          "links": [
+            4
+          ]
+        }
+      ],
+      "title": "H3 音频 VAE",
+      "properties": {
+        "Node name for S&R": "VAELoader"
+      },
+      "widgets_values": [
+        "minimax_h3_audio_vae_fp32.safetensors"
+      ],
+      "widgets_values_named": {
+        "vae_name": "minimax_h3_audio_vae_fp32.safetensors"
+      }
+    },
+    {
+      "id": 9,
+      "type": "YogurtH3Director",
+      "pos": [
+        1000,
+        0
+      ],
+      "size": [
+        564,
+        1298
+      ],
+      "flags": {},
+      "order": 9,
+      "mode": 0,
+      "inputs": [
+        {
+          "localized_name": "model",
+          "name": "model",
+          "type": "MODEL",
+          "link": 9
+        },
+        {
+          "localized_name": "clip",
+          "name": "clip",
+          "type": "CLIP",
+          "link": 2
+        },
+        {
+          "localized_name": "vae",
+          "name": "vae",
+          "type": "VAE",
+          "link": 3
+        },
+        {
+          "localized_name": "audio_vae",
+          "name": "audio_vae",
+          "type": "VAE",
+          "link": 4
+        },
+        {
+          "localized_name": "ref_model",
+          "name": "ref_model",
+          "shape": 7,
+          "type": "MODEL",
+          "link": null
+        },
+        {
+          "localized_name": "refine_model",
+          "name": "refine_model",
+          "shape": 7,
+          "type": "MODEL",
+          "link": null
+        },
+        {
+          "localized_name": "rewriter",
+          "name": "rewriter",
+          "shape": 7,
+          "type": "YOGURT_H3_REWRITER",
+          "link": null
+        },
+        {
+          "localized_name": "inpaint_patch",
+          "name": "inpaint_patch",
+          "shape": 7,
+          "type": "MODEL_PATCH",
+          "link": null
+        },
+        {
+          "localized_name": "upscale_model",
+          "name": "upscale_model",
+          "shape": 7,
+          "type": "UPSCALE_MODEL",
+          "link": null
+        },
+        {
+          "localized_name": "sampler",
+          "name": "sampler",
+          "shape": 7,
+          "type": "SAMPLER",
+          "link": null
+        },
+        {
+          "localized_name": "sigmas",
+          "name": "sigmas",
+          "shape": 7,
+          "type": "SIGMAS",
+          "link": null
+        },
+        {
+          "localized_name": "sam3",
+          "name": "sam3",
+          "shape": 7,
+          "type": "MODEL",
+          "link": 13
+        },
+        {
+          "localized_name": "sam3_clip",
+          "name": "sam3_clip",
+          "shape": 7,
+          "type": "CLIP",
+          "link": 14
+        },
+        {
+          "localized_name": "image_0",
+          "name": "images.image_0",
+          "shape": 7,
+          "type": "IMAGE",
+          "link": null
+        },
+        {
+          "localized_name": "mask_0",
+          "name": "masks.mask_0",
+          "shape": 7,
+          "type": "MASK",
+          "link": null
+        },
+        {
+          "localized_name": "video_0",
+          "name": "videos.video_0",
+          "shape": 7,
+          "type": "VIDEO",
+          "link": 12
+        },
+        {
+          "localized_name": "video_1",
+          "name": "videos.video_1",
+          "shape": 7,
+          "type": "VIDEO",
+          "link": null
+        },
+        {
+          "localized_name": "audio_0",
+          "name": "audios.audio_0",
+          "shape": 7,
+          "type": "AUDIO",
+          "link": null
+        },
+        {
+          "localized_name": "seed",
+          "name": "seed",
+          "type": "INT",
+          "widget": {
+            "name": "seed"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "steps",
+          "name": "steps",
+          "type": "INT",
+          "widget": {
+            "name": "steps"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "cfg",
+          "name": "cfg",
+          "type": "FLOAT",
+          "widget": {
+            "name": "cfg"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "sampler_name",
+          "name": "sampler_name",
+          "type": "COMBO",
+          "widget": {
+            "name": "sampler_name"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "scheduler",
+          "name": "scheduler",
+          "type": "COMBO",
+          "widget": {
+            "name": "scheduler"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "filename_prefix",
+          "name": "filename_prefix",
+          "type": "STRING",
+          "widget": {
+            "name": "filename_prefix"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "project",
+          "name": "project",
+          "type": "STRING",
+          "widget": {
+            "name": "project"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "width",
+          "name": "width",
+          "type": "INT",
+          "widget": {
+            "name": "width"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "height",
+          "name": "height",
+          "type": "INT",
+          "widget": {
+            "name": "height"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "overlap",
+          "name": "overlap",
+          "type": "COMBO",
+          "widget": {
+            "name": "overlap"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "ref_image_size",
+          "name": "ref_image_size",
+          "type": "COMBO",
+          "widget": {
+            "name": "ref_image_size"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "negative_prompt",
+          "name": "negative_prompt",
+          "type": "STRING",
+          "widget": {
+            "name": "negative_prompt"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "two_pass",
+          "name": "two_pass",
+          "type": "BOOLEAN",
+          "widget": {
+            "name": "two_pass"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "two_pass_scale",
+          "name": "two_pass_scale",
+          "type": "FLOAT",
+          "widget": {
+            "name": "two_pass_scale"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "two_pass_steps",
+          "name": "two_pass_steps",
+          "type": "INT",
+          "widget": {
+            "name": "two_pass_steps"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "two_pass_upscaler",
+          "name": "two_pass_upscaler",
+          "type": "COMBO",
+          "widget": {
+            "name": "two_pass_upscaler"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "two_pass_latent_model",
+          "name": "two_pass_latent_model",
+          "type": "COMBO",
+          "widget": {
+            "name": "two_pass_latent_model"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "rerender",
+          "name": "rerender",
+          "type": "BOOLEAN",
+          "widget": {
+            "name": "rerender"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "rerender_scale",
+          "name": "rerender_scale",
+          "type": "FLOAT",
+          "widget": {
+            "name": "rerender_scale"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "rerender_steps",
+          "name": "rerender_steps",
+          "type": "INT",
+          "widget": {
+            "name": "rerender_steps"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "rerender_denoise",
+          "name": "rerender_denoise",
+          "type": "FLOAT",
+          "widget": {
+            "name": "rerender_denoise"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "rerender_upscaler",
+          "name": "rerender_upscaler",
+          "type": "COMBO",
+          "widget": {
+            "name": "rerender_upscaler"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "rerender_latent_model",
+          "name": "rerender_latent_model",
+          "type": "COMBO",
+          "widget": {
+            "name": "rerender_latent_model"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "detail",
+          "name": "detail",
+          "type": "BOOLEAN",
+          "widget": {
+            "name": "detail"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "detail_steps",
+          "name": "detail_steps",
+          "type": "INT",
+          "widget": {
+            "name": "detail_steps"
+          },
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "localized_name": "video",
+          "name": "video",
+          "type": "VIDEO",
+          "links": null
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "YogurtH3Director"
+      },
+      "widgets_values": [
+        0,
+        "fixed",
+        8,
+        1,
+        "euler",
+        "simple",
+        "yogurt_h3/director",
+        "{\"version\":1,\"soundtrack\":null,\"refs\":{\"images\":[],\"videos\":[],\"audios\":[]},\"story\":\"\",\"rewrite\":{\"enabled\":false,\"notes\":\"\",\"seed\":0},\"shots\":[{\"id\":\"clip\",\"kind\":\"source\",\"frames\":121,\"prompt\":\"\",\"continue\":false,\"seed\":0,\"audio\":\"source\",\"source\":{\"media\":{\"input\":\"video_0\"},\"start\":0,\"regen\":false,\"strength\":1,\"share\":true,\"description\":\"\"},\"repaints\":[{\"id\":\"camisole\",\"enabled\":true,\"source\":\"text\",\"target\":\"shirt, jacket\",\"threshold\":0.4,\"objects\":2,\"mask\":null,\"input\":\"\",\"box\":[0.3,0.15,0.4,0.5],\"detector\":\"face_yolov8m.pt\",\"crop\":false,\"megapixels\":0.5,\"start\":0,\"end\":-1,\"strength\":1,\"grow\":12,\"feather\":8,\"seed\":0,\"prompt\":\"她穿着一件红色细肩带吊带背心，露出肩膀和手臂，丝滑的面料随动作自然起伏，光影和周围画面一致。\"}]}]}",
+        1344,
+        768,
+        "22",
+        "match",
+        "",
+        false,
+        2,
+        2,
+        "h3_latent",
+        "minimax_h3_latent_upscaler_3d_conv_v1_fp16.safetensors",
+        false,
+        1,
+        2,
+        0.35,
+        "h3_latent",
+        "minimax_h3_latent_upscaler_3d_conv_v1_fp16.safetensors",
+        true,
+        3
+      ],
+      "widgets_values_named": {
+        "seed": 0,
+        "control_after_generate": "fixed",
+        "steps": 8,
+        "cfg": 1,
+        "sampler_name": "euler",
+        "scheduler": "simple",
+        "filename_prefix": "yogurt_h3/director",
+        "project": "{\"version\":1,\"soundtrack\":null,\"refs\":{\"images\":[],\"videos\":[],\"audios\":[]},\"story\":\"\",\"rewrite\":{\"enabled\":false,\"notes\":\"\",\"seed\":0},\"shots\":[{\"id\":\"clip\",\"kind\":\"source\",\"frames\":121,\"prompt\":\"\",\"continue\":false,\"seed\":0,\"audio\":\"source\",\"source\":{\"media\":{\"input\":\"video_0\"},\"start\":0,\"regen\":false,\"strength\":1,\"share\":true,\"description\":\"\"},\"repaints\":[{\"id\":\"camisole\",\"enabled\":true,\"source\":\"text\",\"target\":\"shirt, jacket\",\"threshold\":0.4,\"objects\":2,\"mask\":null,\"input\":\"\",\"box\":[0.3,0.15,0.4,0.5],\"detector\":\"face_yolov8m.pt\",\"crop\":false,\"megapixels\":0.5,\"start\":0,\"end\":-1,\"strength\":1,\"grow\":12,\"feather\":8,\"seed\":0,\"prompt\":\"她穿着一件红色细肩带吊带背心，露出肩膀和手臂，丝滑的面料随动作自然起伏，光影和周围画面一致。\"}]}]}",
+        "width": 1344,
+        "height": 768,
+        "overlap": "22",
+        "ref_image_size": "match",
+        "negative_prompt": "",
+        "two_pass": false,
+        "two_pass_scale": 2,
+        "two_pass_steps": 2,
+        "two_pass_upscaler": "h3_latent",
+        "two_pass_latent_model": "minimax_h3_latent_upscaler_3d_conv_v1_fp16.safetensors",
+        "rerender": false,
+        "rerender_scale": 1,
+        "rerender_steps": 2,
+        "rerender_denoise": 0.35,
+        "rerender_upscaler": "h3_latent",
+        "rerender_latent_model": "minimax_h3_latent_upscaler_3d_conv_v1_fp16.safetensors",
+        "detail": true,
+        "detail_steps": 3
+      }
+    },
+    {
+      "id": 11,
+      "type": "LoraLoaderModelOnly",
+      "pos": [
+        340,
+        -10
+      ],
+      "size": [
+        270,
+        82
+      ],
+      "flags": {},
+      "order": 7,
+      "mode": 0,
+      "inputs": [
+        {
+          "localized_name": "model",
+          "name": "model",
+          "type": "MODEL",
+          "link": 7
+        },
+        {
+          "localized_name": "lora_name",
+          "name": "lora_name",
+          "type": "COMBO",
+          "widget": {
+            "name": "lora_name"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "strength_model",
+          "name": "strength_model",
+          "type": "FLOAT",
+          "widget": {
+            "name": "strength_model"
+          },
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "localized_name": "MODEL",
+          "name": "MODEL",
+          "type": "MODEL",
+          "links": [
+            8
+          ]
+        }
+      ],
+      "title": "Turbo 8 步 · fl2va（lightx2v v1.1）",
+      "properties": {
+        "Node name for S&R": "LoraLoaderModelOnly"
+      },
+      "widgets_values": [
+        "minimax_h3_fl2v_turbo_8step_v1.1_768p_comfyui_bf16.safetensors",
+        1
+      ],
+      "widgets_values_named": {
+        "lora_name": "minimax_h3_fl2v_turbo_8step_v1.1_768p_comfyui_bf16.safetensors",
+        "strength_model": 1
+      }
+    },
+    {
+      "id": 12,
+      "type": "MiniMaxH3SigmaShift",
+      "pos": [
+        680,
+        -10
+      ],
+      "size": [
+        277.2857421875,
+        82
+      ],
+      "flags": {},
+      "order": 8,
+      "mode": 0,
+      "inputs": [
+        {
+          "localized_name": "model",
+          "name": "model",
+          "type": "MODEL",
+          "link": 8
+        },
+        {
+          "localized_name": "shift_video",
+          "name": "shift_video",
+          "type": "FLOAT",
+          "widget": {
+            "name": "shift_video"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "shift_audio",
+          "name": "shift_audio",
+          "type": "FLOAT",
+          "widget": {
+            "name": "shift_audio"
+          },
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "localized_name": "MODEL",
+          "name": "MODEL",
+          "type": "MODEL",
+          "links": [
+            9
+          ]
+        }
+      ],
+      "title": "FL2V Turbo：shift 6 / 3",
+      "properties": {
+        "Node name for S&R": "MiniMaxH3SigmaShift"
+      },
+      "widgets_values": [
+        6,
+        3
+      ],
+      "widgets_values_named": {
+        "shift_video": 6,
+        "shift_audio": 3
+      }
+    },
+    {
+      "id": 14,
+      "type": "LoadVideo",
+      "pos": [
+        40,
+        700
+      ],
+      "size": [
+        282.798828125,
+        82
+      ],
+      "flags": {},
+      "order": 5,
+      "mode": 0,
+      "inputs": [
+        {
+          "localized_name": "file",
+          "name": "file",
+          "type": "COMBO",
+          "widget": {
+            "name": "file"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "choose file to upload",
+          "name": "upload",
+          "type": "IMAGEUPLOAD",
+          "widget": {
+            "name": "upload"
+          },
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "localized_name": "VIDEO",
+          "name": "VIDEO",
+          "type": "VIDEO",
+          "links": [
+            12
+          ]
+        }
+      ],
+      "title": "你的视频 → video_0",
+      "properties": {
+        "Node name for S&R": "LoadVideo"
+      },
+      "widgets_values": [
+        "video.mp4",
+        "image"
+      ],
+      "widgets_values_named": {
+        "file": "video.mp4",
+        "upload": "image"
+      }
+    },
+    {
+      "id": 15,
+      "type": "CheckpointLoaderSimple",
+      "pos": [
+        40,
+        1060
+      ],
+      "size": [
+        270,
+        98
+      ],
+      "flags": {},
+      "order": 6,
+      "mode": 0,
+      "inputs": [
+        {
+          "localized_name": "ckpt_name",
+          "name": "ckpt_name",
+          "type": "COMBO",
+          "widget": {
+            "name": "ckpt_name"
+          },
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "localized_name": "MODEL",
+          "name": "MODEL",
+          "type": "MODEL",
+          "links": [
+            13
+          ]
+        },
+        {
+          "localized_name": "CLIP",
+          "name": "CLIP",
+          "type": "CLIP",
+          "links": [
+            14
+          ]
+        },
+        {
+          "localized_name": "VAE",
+          "name": "VAE",
+          "type": "VAE",
+          "links": null
+        }
+      ],
+      "title": "SAM 3 → sam3 / sam3_clip（文字识别衣服）",
+      "properties": {
+        "Node name for S&R": "CheckpointLoaderSimple"
+      },
+      "widgets_values": [
+        "sam3.1_multiplex_fp16.safetensors"
+      ],
+      "widgets_values_named": {
+        "ckpt_name": "sam3.1_multiplex_fp16.safetensors"
+      }
+    }
+  ],
+  "links": [
+    [
+      7,
+      2,
+      0,
+      11,
+      0,
+      "MODEL"
+    ],
+    [
+      8,
+      11,
+      0,
+      12,
+      0,
+      "MODEL"
+    ],
+    [
+      9,
+      12,
+      0,
+      9,
+      0,
+      "MODEL"
+    ],
+    [
+      2,
+      4,
+      0,
+      9,
+      1,
+      "CLIP"
+    ],
+    [
+      3,
+      5,
+      0,
+      9,
+      2,
+      "VAE"
+    ],
+    [
+      4,
+      6,
+      0,
+      9,
+      3,
+      "VAE"
+    ],
+    [
+      12,
+      14,
+      0,
+      9,
+      15,
+      "VIDEO"
+    ],
+    [
+      13,
+      15,
+      0,
+      9,
+      11,
+      "MODEL"
+    ],
+    [
+      14,
+      15,
+      1,
+      9,
+      12,
+      "CLIP"
+    ]
+  ],
+  "groups": [],
+  "config": {},
+  "extra": {
+    "ds": {
+      "scale": 1,
+      "offset": [
+        0,
+        0
+      ]
+    }
+  },
+  "version": 0.4
+}
