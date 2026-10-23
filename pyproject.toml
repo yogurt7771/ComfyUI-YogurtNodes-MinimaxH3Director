@@ -1,12 +1,12 @@
 [project]
 name = "comfyui-yogurtnodes-minimaxh3director"
 version = "1.0.0"
-description = "Visual MiniMax H3 director for ComfyUI: shot timeline with text, first/last-frame, reference and source-video shots, masked repaint, refine pass and region detailing, rendered to a finished video"
+description = "Visual MiniMax H3 director for ComfyUI: shot timeline with text, first/last-frame, reference and source-video shots, masked repaint with SAM 3 text masks and crop-and-paste detail, two-pass refine and rerender, rendered to a finished video with sound"
 readme = "README.md"
 license = {file = "LICENSE"}
 requires-python = ">=3.10"
 dependencies = []
-keywords = ["comfyui", "minimax-h3", "video", "director", "timeline", "inpainting"]
+keywords = ["comfyui", "minimax-h3", "video", "director", "timeline", "inpainting", "sam3"]
 
 [tool.comfy]
 PublisherId = "yogurt"
