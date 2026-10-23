@@ -187,13 +187,19 @@ app.registerExtension({
             const result = executed?.apply(this, arguments);
             const mask = message?.yogurt_h3_mask?.[0];
             if (mask) {
-                // A 识别预览 run: the tinted mask of one 局部重绘 layer and the English its text target became.
+                // A 识别预览 run: one 局部重绘 layer's mask over its frames and the English its text target became.
                 this.properties = this.properties || {};
                 this.properties.yh3Masks = { ...(this.properties.yh3Masks || {}), [mask.layer]: mask };
                 this.properties.yh3Targets = { ...(this.properties.yh3Targets || {}), ...mask.targets };
                 changed();
-                const editor = this.yh3Panel?.editor;
-                if (editor?.root?.isConnected && editor.tab === "repaint") editor.renderInspector();
+                const panel = this.yh3Panel;
+                if (panel) {
+                    // The preview's progress marked its shot as busy; only a finished render keeps a mark.
+                    for (const [id, state] of Object.entries(panel.states)) if (state !== "complete") delete panel.states[id];
+                    panel.say("识别预览完成，结果在“局部重绘”页。");
+                    panel.refresh();
+                    if (panel.editor?.root?.isConnected && panel.editor.tab === "repaint") panel.editor.renderInspector();
+                }
             }
             const info = message?.yogurt_h3?.[0];
             if (info) {
