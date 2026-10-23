@@ -110,7 +110,10 @@ def token_mask(pixels, latent_t):
 def grow(mask, pixels):
     if pixels <= 0:
         return mask
-    return F.max_pool2d(mask[:, None], 2 * pixels + 1, stride=1, padding=pixels)[:, 0]
+    # A square dilation is separable: rows, then columns (2k instead of k^2 comparisons per pixel).
+    size = 2 * pixels + 1
+    rows = F.max_pool2d(mask[:, None], (1, size), stride=1, padding=(0, pixels))
+    return F.max_pool2d(rows, (size, 1), stride=1, padding=(pixels, 0))[:, 0]
 
 
 def feather(mask, pixels):
