@@ -23,6 +23,9 @@
 <p align="center"><img src="docs/images/compare.webp" alt="原视频与导演台换成红色吊带的对比" width="100%"></p>
 <p align="center"><sub>左：H3 生成的原视频。右：<a href="example_workflows/yogurt_h3_repaint_clothes.json">换衣工作流</a>按默认设置运行，SAM 3 按 <code>shirt, jacket</code> 跟住衬衫，重绘成红色吊带；脸、头发、街景和原声都没动。</sub></p>
 
+<p align="center"><img src="docs/images/swap.webp" alt="MV 主角换成 ComfyUI 吉祥物的对比" width="100%"></p>
+<p align="center"><sub>左：30 秒的 MV 片段，开头带 2 帧封面，之后有 11 个剪辑点。右：源视频整体改写，参考图是 ComfyUI 吉祥物的角色设定图；自动分段在剪辑点处切成 8 段，封面单独一镜、成片里换成生成后的那一帧，声音保留原声。</sub></p>
+
 ---
 
 **Yogurt H3 导演台**把一部短片的镜头、素材、声音和提示词放进同一条时间线：在节点里点“打开导演台”编排，运行一次，得到拼接好的 MP4（H.264 + AAC）。
