@@ -146,6 +146,21 @@ class RenderTests(unittest.TestCase):
         self.assertFalse(torch.allclose(frames[:, :, :64], expected[:, :, :64], atol=0.02))
         self.assertAlmostEqual(self.probe(path)[1], 30 / 24, delta=0.05)
 
+    def test_source_rewrite_samples_its_own_sound_and_keeps_the_source_audio(self):
+        # Locked to the source's audio, H3 follows the sound and drifts off the video it rewrites.
+        write_video(self.root / "input" / "clip.mp4", 48, 256, 128, audio_seconds=2)
+        source = {"media": {"filename": "clip.mp4", "subfolder": "", "type": "input"}, "start": 6, "regen": True}
+        shots = [{"id": "s", "kind": "source", "frames": 30, "prompt": "改写", "source": source}]
+        job, path = self.run_project({"shots": shots}, {"two_pass": True, "width": 256, "height": 128, "two_pass_scale": 2.0, "two_pass_steps": 2},
+                                     ref_model="ref_model")
+        base, refine = self.fake.calls
+        self.assertEqual((base["audio_mask"].min().item(), refine["audio_mask"].min().item()), (1.0, 1.0))
+        self.assertTrue(base["last"])
+        self.assertIsNotNone(refine["audio_noise"])
+        with av.open(str(path)) as container:
+            audio = np.concatenate([frame.to_ndarray() for frame in container.decode(audio=0)], axis=1)
+        self.assertGreater(np.abs(audio[:, 4800:43200]).mean(), 0.1)
+
     def test_two_pass_refine_splits_one_schedule(self):
         shots = [{"id": "a", "frames": 30, "prompt": "一"}, {"id": "b", "frames": 30, "prompt": "二"}]
         job, path = self.run_project({"shots": shots}, {"two_pass": True, "width": 256, "height": 128, "two_pass_scale": 2.0, "two_pass_steps": 2})

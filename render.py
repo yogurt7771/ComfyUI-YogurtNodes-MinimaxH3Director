@@ -33,7 +33,7 @@ from .media import fit, match_rate
 from .output import Mp4Writer, read_frames, write_frames
 from .project import FPS, plan_windows
 
-VERSION = "director-1"
+VERSION = "director-2"
 AUDIO_RATE = 48000
 EVENT = "yogurt_h3.director"
 
@@ -228,10 +228,17 @@ class Render:
     def silence(self, frames):
         return self.encode_audio({"waveform": torch.zeros((1, 2, round(frames * 32000 / FPS))), "sample_rate": 32000}, frames)
 
+    def samples_sound(self, shot):
+        """The sampler makes the shot's sound: 生成, and a 源视频改写 keeping its source audio, laid in when the shot is
+        assembled. The rewrite already follows the source video in time; locked to that video's audio as well, H3 follows
+        the sound instead (seen: the action slowed to a third for 1.6 s, then ran 27 frames behind the source)."""
+        mode = self.audio_mode(shot)
+        return mode == "generate" or mode == "source" and shot["kind"] == "source" and shot["source"]["regen"]
+
     def lock_audio(self, window):
-        """Encoded audio the shot is locked to, or None when the shot generates its own sound."""
+        """Encoded audio the shot is locked to, or None when the shot samples its own sound."""
         mode, shot = self.audio_mode(window.shot), window.shot
-        if mode == "generate":
+        if self.samples_sound(shot):
             return None
         if mode == "silent":
             return self.silence(window.gen)
@@ -475,7 +482,7 @@ class Render:
                     self.event(i, "refining")
                     name, sigmas = "两段式二采", sampling.split(self.schedule(shot), settings["steps"])[1]
                     # The draft stopped early, so generated sound takes the last steps too, on the path it was already on.
-                    free_audio = self.audio_mode(shot) == "generate"
+                    free_audio = self.samples_sound(shot)
                     audio_noise = self.audio_noise.get(i) if free_audio else None
                     if free_audio and audio_noise is None:
                         self.report.append(f"第 {i + 1} 镜：首采没有留下声音的噪声（采样器未回报或旧缓存），二采声音重新加噪")

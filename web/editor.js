@@ -13,7 +13,7 @@ const clipTime = frames => {
     const seconds = frames / FPS, minutes = Math.floor(seconds / 60);
     return minutes ? `${minutes}:${(seconds - minutes * 60).toFixed(2).padStart(5, "0")}` : `${seconds.toFixed(2)}s`;
 };
-const AUDIO_LABELS = { generate: "模型生成", soundtrack: "配乐音轨（锁定）", source: "源视频原声（锁定）", silent: "静音" };
+const AUDIO_LABELS = { generate: "模型生成", soundtrack: "配乐音轨（锁定）", source: "源视频原声", silent: "静音" };
 const TABS = [["story", "剧本"], ["shot", "镜头"], ["keys", "首尾帧"], ["refs", "参考"], ["repaint", "局部重绘"]];
 const SOURCES = [["paint", "手绘"], ["input", "连线遮罩"], ["text", "文字识别"], ["face", "跟随人脸"], ["box", "固定框"]];
 const boxed = layer => layer.source === "face" || layer.source === "box";
