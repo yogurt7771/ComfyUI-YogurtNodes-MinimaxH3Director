@@ -2,9 +2,9 @@
 import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
 import {
-    FPS, SHARED, STAGES, changed, clamp, clone, effectiveRefs, features, graphInputs, h, inputPreview, isAudio, isVideo, mediaLabel, mediaUrl, refCount,
-    newLayer, newShot, pickFile, planWindows, previewRewrite, projectData, readProject, rewritable, rewriterConfig, secs, storePrompts, totalFrames, uid,
-    upload, widget, writeProject,
+    FPS, SHARED, STAGES, changed, clamp, clone, effectiveRefs, features, follows, graphInputs, h, inputPreview, isAudio, isVideo, mediaLabel, mediaUrl,
+    refCount, newLayer, newShot, pickFile, planWindows, previewRewrite, projectData, readProject, rewritable, rewriterConfig, secs, sourceFile,
+    storePrompts, totalFrames, uid, upload, widget, writeProject,
 } from "./core.js";
 import { Painter } from "./painter.js";
 
@@ -45,6 +45,8 @@ class Editor {
         this.playing = false;
         this.paint = -1;
         this.boxing = -1;
+        // 自动分段 settings, in frames; segments 0 lets the planner choose the count.
+        this.splitting = { shortest: 5 * FPS, longest: 10 * FPS, segments: 0, cover: true };
     }
 
     get shot() { return this.project.shots[this.selected]; }
@@ -553,6 +555,57 @@ class Editor {
         this.commit(true);
     }
 
+    /**
+     * 自动分段: the backend reads this source shot's cuts and motion and picks where segments join; the shot is replaced
+     * by them, each keeping its settings, with keyframes and repaint ranges moved to the segment they fall in. A cover
+     * the video opens with becomes its own shot that shows, in the film, the generated frame it repeats: back in the
+     * film, never in a segment's reference video.
+     */
+    async autoSplit() {
+        const shot = this.shot, file = sourceFile(this.node, shot.source.media);
+        const { shortest, longest, segments, cover: detect } = this.splitting;
+        if (!file) return this.panel.say("自动分段需要上传的视频文件或 LoadVideo 里的视频。");
+        if (longest < shortest) return this.panel.say("自动分段：最长时长不能短于最短时长。");
+        this.panel.say("自动分段：正在分析源视频的剪辑点和动作……");
+        let result;
+        try {
+            const response = await api.fetchApi("/yogurt_h3/director/split", { method: "POST", body: JSON.stringify({
+                media: file, start: shot.source.start, frames: shot.frames, shortest, longest, segments, cover: detect, overlap: this.project.overlap }) });
+            result = await response.json();
+            if (!response.ok) throw new Error(result.error || response.statusText);
+        } catch (error) {
+            return this.panel.say(`自动分段失败：${error.message}`);
+        }
+        const last = frame => (frame === -1 ? shot.frames - 1 : frame), cover = result.cover;
+        const parts = result.segments.map((segment, k) => {
+            const part = clone(shot), offset = segment.start - shot.source.start, end = offset + segment.frames - 1;
+            Object.assign(part, { id: uid(), frames: segment.frames, continue: k ? segment.carry : !cover && shot.continue });
+            part.source.start = segment.start;
+            part.keyframes = shot.keyframes.filter(key => last(key.at) >= offset && last(key.at) <= end)
+                .map(key => ({ ...clone(key), at: key.at === -1 ? -1 : key.at - offset }));
+            part.repaints = shot.repaints.filter(layer => last(layer.end) >= offset && layer.start <= end).map(layer => ({
+                ...clone(layer), id: uid(), start: Math.max(layer.start - offset, 0), end: last(layer.end) >= end ? -1 : layer.end - offset }));
+            return part;
+        });
+        const still = cover && Object.assign(clone(shot), { id: uid(), frames: cover.frames, prompt: "", keyframes: [], repaints: [] });
+        if (still) {
+            still.source.regen = false;
+            const copy = shot.source.start + cover.copy, k = result.segments.findIndex(s => s.start <= copy && copy < s.start + s.frames);
+            still.still = { shot: parts[k].id, frame: copy - result.segments[k].start };
+        }
+        this.project.shots.splice(this.selected, 1, ...(still ? [still] : []), ...parts);
+        this.frame = 0;
+        this.commit(true);
+        const first = this.selected + (still ? 1 : 0);
+        const joins = parts.slice(1).map(p => (p.continue ? "续接" : "剪辑点硬切"));
+        const cuts = result.segments.map((s, k) => (s.cuts.length ? `第 ${first + k + 1} 镜剪辑点 ${s.cuts.map(secs).join("、")}` : "")).filter(Boolean);
+        const masks = shot.repaints.some(layer => layer.source === "input") ? "连线遮罩按整镜对齐，分段后请改用文字识别或手绘遮罩。" : "";
+        const held = still && parts.findIndex(p => p.id === still.still.shot);
+        const kept = still ? `开头 ${cover.frames} 帧是封面（与 ${secs(cover.copy)} 的画面相同），作为第 ${this.selected + 1} 镜不参与生成，成片里换成第 ${first + held + 1} 镜生成后的这一帧；` : "";
+        this.panel.say(`自动分段：${kept}${parts.length} 段（${parts.map(p => secs(p.frames)).join(" / ")}）${joins.length ? `，接缝 ${joins.join("、")}` : ""}。`
+            + `${cuts.length ? ` ${cuts.join("；")}。` : ""}${result.note}${masks}`);
+    }
+
     removeShot() {
         if (this.project.shots.length === 1) return;
         if (!confirm(`删除第 ${this.selected + 1} 镜？`)) return;
@@ -807,12 +860,25 @@ class Editor {
             } else {
                 parts.push(h("div.note", {}, "保留原画：遮罩外像素原样输出。在“局部重绘”画遮罩、在“局部精修”框区域。"));
             }
+            const held = shot.still && this.project.shots.findIndex(s => s.id === shot.still.shot);
+            if (held >= 0) parts.push(h("div.note", {}, `封面：成片里显示第 ${held + 1} 镜第 ${shot.still.frame + 1} 帧的生成结果。`));
         }
         parts.push(this.field("时长（秒）", h("div.row", {}, this.number(shot, "frames", { min: 5, max: FPS * 600, step: 0.125, scale: FPS, after: () => this.commit(true) }),
             h("span.dim", {}, `生成 ${w.gen} 帧${w.head ? `（含续接 ${w.head} 帧）` : ""} · 输出 ${w.keep} 帧`))));
-        if (shot.kind === "generate" && !first) {
-            parts.push(h("div.field", {}, this.check(shot, "continue", "接着上一镜继续拍（latent 续接，画面与声音连贯）", () => this.commit(true)),
-                !w.carry && shot.continue ? h("span.warn", {}, "上一镜过短或工程关闭了续接，本镜将硬切开始。") : null));
+        if (shot.kind === "source" && shot.source.media) {
+            const seconds = key => this.number(this.splitting, key, { min: FPS, max: 15 * FPS, step: 0.5, scale: FPS });
+            parts.push(this.field("自动分段（每段一个镜头：剪辑点处硬切，不到 1 秒的快切镜头合成一段；比最长时长还长的镜头在镜头内续接切开，切出的每段不短于最短时长）",
+                h("div.row", {}, "最短", seconds("shortest"), "秒 · 最长", seconds("longest"), "秒 · 段数",
+                    this.number(this.splitting, "segments", { min: 0, max: 99 }), h("span.dim", {}, "0 = 自动"),
+                    h("button", { onclick: () => this.autoSplit() }, "自动分段")),
+                this.check(this.splitting, "cover", "识别开头的封面帧（单独成一镜不参与生成，成片里换成它重复的那一帧的生成结果）")));
+        }
+        const source = shot.kind === "source";
+        if (!first && (!source || follows(this.project.shots[this.selected - 1], shot))) {
+            parts.push(h("div.field", {}, this.check(shot, "continue", source ? "接着上一镜的源视频续接（latent 续接，接缝处人物与画面连贯）"
+                : "接着上一镜继续拍（latent 续接，画面与声音连贯）", () => this.commit(true)),
+                !w.carry && shot.continue ? h("span.warn", {}, source ? "上一镜的生成长度不在 17k+5 上或工程关闭了续接，本镜直接接上。"
+                    : "上一镜过短或工程关闭了续接，本镜将硬切开始。") : null));
         }
         const keepsPixels = shot.kind === "source" && !shot.source.regen;
         if (this.project.rewrite.enabled && !keepsPixels) {

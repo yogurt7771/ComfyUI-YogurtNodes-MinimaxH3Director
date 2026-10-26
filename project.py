@@ -165,7 +165,7 @@ def _shot(raw, index, global_refs):
         "kind": kind,
         "frames": _int(raw.get("frames"), 121, 1, 24 * 600),
         "prompt": str(raw.get("prompt") or ""),
-        "continue": bool(raw.get("continue", True)),
+        "continue": bool(raw.get("continue", kind == "generate")),
         "seed": _int(raw.get("seed"), 0, 0, 2**31),
         "keyframes": keyframes,
         "refs": {kind: inherited[kind] + own[kind] for kind in own},
@@ -175,6 +175,8 @@ def _shot(raw, index, global_refs):
         # How closely the shot follows its references and keyframes (H3's visual condition strength).
         "ref_strength": _float(raw.get("ref_strength"), 1.0, 0.1, 1.0),
         "source": source,
+        # A cover 自动分段 put back: the film shows this frame of another shot's result in its place.
+        "still": _still(raw.get("still")) if kind == "source" else None,
         "audio": audio,
         # 局部重绘 layers: in place on the draft before 二采, or cropped, enlarged and pasted back after it.
         "repaints": [layer for layer in layers if not layer["crop"]],
@@ -188,6 +190,10 @@ def _upscaler(settings, prefix):
     upscaler = settings[f"{prefix}_upscaler"]
     return {"upscaler": upscaler if upscaler in REFINE_UPSCALERS else "lanczos",
             "latent_model": str(settings[f"{prefix}_latent_model"] or LATENT_UPSCALER)}
+
+
+def _still(raw):
+    return {"shot": str(raw["shot"]), "frame": _int(raw.get("frame"), 0, 0, 24 * 600)} if isinstance(raw, dict) and raw.get("shot") else None
 
 
 def _box(value):
@@ -259,6 +265,14 @@ def load_project(text, settings=None):
         "detail": {"steps": _int(s["detail_steps"], 8, 1, 200)},
     }
     project["shots"] = [_shot(raw, i, project["refs"]) for i, raw in enumerate(data.get("shots") or []) if isinstance(raw, dict)]
+    frames = {shot["id"]: shot["frames"] for shot in project["shots"]}
+    for shot in project["shots"]:
+        still = shot["still"]
+        # Once the shot it shows is deleted (or it would show itself), the cover keeps its own pixels.
+        if still and (still["shot"] not in frames or still["shot"] == shot["id"]):
+            shot["still"] = None
+        elif still:
+            still["frame"] = min(still["frame"], frames[still["shot"]] - 1)
     if not s["detail"]:
         for shot in project["shots"]:
             shot["details"] = []
@@ -272,18 +286,27 @@ def load_project(text, settings=None):
     return project
 
 
+def follows(previous, shot):
+    """A source shot that starts where the previous shot left the same video, as 自动分段 cuts one stretch."""
+    return (shot["kind"] == "source" and previous["kind"] == "source" and shot["source"]["media"] == previous["source"]["media"]
+            and shot["source"]["start"] == previous["source"]["start"] + previous["frames"])
+
+
 def plan_windows(project):
     shots, overlap = project["shots"], project["overlap"]
     windows, start = [], 0
     carries = [False] * len(shots)
     for i, shot in enumerate(shots):
-        # Only generated shots can continue a tail; a source shot's content is defined by its video.
-        carries[i] = i > 0 and overlap > 0 and shot["continue"] and shot["kind"] == "generate"
+        # A generated shot can continue any tail; a source shot only the same video's stretch just before it.
+        carries[i] = i > 0 and overlap > 0 and shot["continue"] and (shot["kind"] == "generate" or follows(shots[i - 1], shot))
     gens = []
     for i, shot in enumerate(shots):
         head = overlap if carries[i] else 0
         gens.append(align_frame_count(head + shot["frames"]))
-        if carries[i] and gens[i - 1] < overlap:
+        # A source shot is continued from the previous window's last frames, so that window must end on its own last
+        # frame: no grid padding after it.
+        padded = carries[i] and shot["kind"] == "source" and gens[i - 1] != (overlap if carries[i - 1] else 0) + shots[i - 1]["frames"]
+        if carries[i] and (gens[i - 1] < overlap or padded):
             carries[i], gens[i] = False, align_frame_count(shot["frames"])
     for i, shot in enumerate(shots):
         head = overlap if carries[i] else 0

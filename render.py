@@ -33,7 +33,7 @@ from .media import fit, match_rate
 from .output import Mp4Writer, read_frames, write_frames
 from .project import FPS, plan_windows
 
-VERSION = "director-2"
+VERSION = "director-3"
 AUDIO_RATE = 48000
 EVENT = "yogurt_h3.director"
 
@@ -177,7 +177,7 @@ class Render:
             for layer in shot["repaints"]:
                 layers.append(digest(["repaint", layers[-1], self.layer_spec(layer), self.env["inpaint"]]))
             source = shot["source"]
-            encoded = lambda size: digest(["source", self.media.identity(source["media"]), source["start"], window.gen, *size])
+            encoded = lambda size: digest(["source", self.media.identity(source["media"]), source["start"], window.head, window.gen, *size])
             passes = []
             for p in range(len(self.passes)):
                 if self.passthrough(shot):
@@ -215,8 +215,11 @@ class Render:
     # ------------------------------------------------------------------ media helpers
 
     def source_frames(self, window, width, height):
+        """The source video under the window: a carried head is the previous shot's stretch of the same video. The grid
+        padding after the shot holds its last frame: past it the source often cuts to another scene, which a rewrite
+        would take as part of its reference video."""
         source = window.shot["source"]
-        return self.media.video(source["media"], source["start"], window.gen, width, height)
+        return _pad(self.media.video(source["media"], source["start"] - window.head, window.head + window.keep, width, height), window.gen)
 
     def encode_audio(self, audio, frames):
         latent, _ = _encode_ref_audio(self.m.audio_vae, audio)
@@ -245,7 +248,7 @@ class Render:
         if mode == "soundtrack":
             audio = self.media.audio(self.project["soundtrack"], window.start - window.head, window.gen)
         else:
-            audio = self.media.audio(shot["source"]["media"], shot["source"]["start"], window.gen)
+            audio = self.media.audio(shot["source"]["media"], shot["source"]["start"] - window.head, window.gen)
         return self.encode_audio(audio, window.gen)
 
     def layer_spec(self, layer):
@@ -293,9 +296,12 @@ class Render:
 
     def repaint_pixels(self, i, j, width, height, behind=None):
         """Layer ``j``'s mask on the generation frames at width x height; grow and feather are in output pixels, the
-        size the editor paints on."""
+        size the editor paints on. A layer that reaches the shot's last frame also covers the grid padding after it:
+        left unmasked, those frames (a source video's next cut) would pin the layer's last frames to what is there."""
         window, layer = self.windows[i], self.windows[i].shot["repaints"][j]
         a, b = window.span(layer["start"], layer["end"])
+        if b == window.head + window.keep:
+            b = window.gen
         mask = sampling.window_mask(self.layer_mask(i, j, behind), window.gen, a, b, width, height)
         return sampling.grow(mask, round(layer["grow"] * width / self.out_w))
 
@@ -373,7 +379,9 @@ class Render:
         lock = self.lock_audio(window)
         if self.edits_source(shot):
             video = m.vae.encode(self.source_frames(window, self.width, self.height)).to(comfy.model_management.intermediate_device())
-            return sampling.av_latent(video, lock)
+            latent = sampling.av_latent(video, lock)
+            # A continued edit opens on the previous shot's result, which its repaints keep and carry on from.
+            return carry_latent_tail(latent, self.final[i - 1], window.head, continue_audio=False)[0] if window.carry else latent
         video, audio = sampling.streams(sampling.empty_latent(self.width, self.height, window.gen))
         denoise = shot["source"]["strength"] if shot["kind"] == "source" else 1.0
         if denoise < 1.0:
@@ -603,6 +611,20 @@ class Render:
             audio = self.media.audio(shot["source"]["media"], shot["source"]["start"], window.keep)
         return match_rate(audio, AUDIO_RATE)[0], window.start
 
+    def shot_frames(self, window):
+        """The frames a window puts in the film, 放大贴回 crops pasted in."""
+        keys = self.keys[window.index]
+        frames = read_frames(keys["frames"])
+        for item, key in zip(window.shot["details"], keys["details"]):
+            boxes = cache.read_json(key)
+            if not boxes:
+                continue
+            a = window.frame(item["start"]) - window.head
+            crops = read_frames(key)
+            weights = cache.read_tensors(key)["mask"].float() / 255 if cache.exists(key) else None
+            frames[a:a + crops.shape[0]] = detail.stitch(frames[a:a + crops.shape[0]], crops, boxes, item["source"] == "face", weights)
+        return frames
+
     def assemble(self, filename_prefix):
         total = sum(w.keep for w in self.windows)
         folder, filename, counter, subfolder, _ = folder_paths.get_save_image_path(
@@ -614,16 +636,12 @@ class Render:
         writer = Mp4Writer(temporary, self.out_w, self.out_h, AUDIO_RATE)
         try:
             for window in self.windows:
-                keys = self.keys[window.index]
-                frames = read_frames(keys["frames"])
-                for item, key in zip(window.shot["details"], keys["details"]):
-                    boxes = cache.read_json(key)
-                    if not boxes:
-                        continue
-                    a = window.frame(item["start"]) - window.head
-                    crops = read_frames(key)
-                    weights = cache.read_tensors(key)["mask"].float() / 255 if cache.exists(key) else None
-                    frames[a:a + crops.shape[0]] = detail.stitch(frames[a:a + crops.shape[0]], crops, boxes, item["source"] == "face", weights)
+                still = window.shot["still"]
+                if still:
+                    shown = self.shot_frames(next(w for w in self.windows if w.shot["id"] == still["shot"]))
+                    frames = shown[min(still["frame"], shown.shape[0] - 1)][None].expand(window.keep, -1, -1, -1)
+                else:
+                    frames = self.shot_frames(window)
                 writer.write(frames)
                 wave, at = self.shot_audio(window)
                 lo, hi = round(at * AUDIO_RATE / FPS), round((window.start + window.keep) * AUDIO_RATE / FPS)

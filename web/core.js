@@ -73,13 +73,19 @@ export function normalize(project) {
 }
 
 /** Same windows as project.plan_windows: head (carried frames), gen (17k+5 window), keep (new frames), start. */
+/** A source shot that starts where the previous shot left the same video, as 自动分段 cuts one stretch. */
+export const follows = (previous, shot) => shot.kind === "source" && previous?.kind === "source"
+    && JSON.stringify(shot.source.media) === JSON.stringify(previous.source.media) && shot.source.start === previous.source.start + previous.frames;
+
 export function planWindows(project) {
     const shots = project.shots, overlap = project.overlap;
-    const carries = shots.map((s, i) => i > 0 && overlap > 0 && s.continue && s.kind === "generate");
+    const carries = shots.map((s, i) => i > 0 && overlap > 0 && s.continue && (s.kind === "generate" || follows(shots[i - 1], s)));
     const gens = [];
     shots.forEach((s, i) => {
         gens.push(align((carries[i] ? overlap : 0) + s.frames));
-        if (carries[i] && gens[i - 1] < overlap) { carries[i] = false; gens[i] = align(s.frames); }
+        // A continued source shot needs the previous window to end on its own last frame: no grid padding after it.
+        const padded = carries[i] && s.kind === "source" && gens[i - 1] !== (carries[i - 1] ? overlap : 0) + shots[i - 1].frames;
+        if (carries[i] && (gens[i - 1] < overlap || padded)) { carries[i] = false; gens[i] = align(s.frames); }
     });
     let start = 0;
     return shots.map((s, i) => {
@@ -189,11 +195,24 @@ function annotated(value) {
  * What the editor can show for a connected socket: the file of a loader wired straight into it, or the thumbnail the
  * last run saved (for anything processed upstream). {url, video} / {audio, name}, or null when nothing is known yet.
  */
-export function inputPreview(node, input) {
+/** The node feeding one of the director's media sockets, e.g. "video_0". */
+function inputOrigin(node, input) {
     const slot = node.inputs?.find(i => i.link != null && (i.name === input || i.name.endsWith(`.${input}`)));
     const links = app.graph.links;
     const link = slot && (links.get ? links.get(slot.link) : links[slot.link]);
-    const origin = link ? app.graph.getNodeById(link.origin_id) : null;
+    return link ? app.graph.getNodeById(link.origin_id) : null;
+}
+
+/** The file behind a source video: an upload, or what a connected LoadVideo loads; null for any other socket. */
+export function sourceFile(node, media) {
+    if (!media?.input) return media;
+    const origin = inputOrigin(node, media.input);
+    const file = origin?.type === "LoadVideo" && origin.widgets?.find(w => w.name === "file")?.value;
+    return file ? annotated(file) : null;
+}
+
+export function inputPreview(node, input) {
+    const origin = inputOrigin(node, input);
     const value = name => origin?.widgets?.find(w => w.name === name)?.value;
     if (origin?.type === "LoadVideo" && value("file")) return { url: mediaUrl(annotated(value("file"))), video: true };
     if (origin?.type === "LoadAudio" && value("audio")) return { audio: true, name: annotated(value("audio")).filename };

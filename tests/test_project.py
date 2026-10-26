@@ -67,11 +67,24 @@ class WindowTests(unittest.TestCase):
         self.assertFalse(windows[1].carry)
         self.assertEqual(windows[1].head, 0)
 
-    def test_source_shots_never_carry(self):
-        source = {"kind": "source", "frames": 40, "source": {"media": {"filename": "v.mp4"}}}
+    def test_a_source_shot_after_a_generated_one_starts_fresh(self):
+        source = {"kind": "source", "frames": 40, "continue": True, "source": {"media": {"filename": "v.mp4"}}}
         windows = project.plan_windows(build({"frames": 40}, source))
         self.assertFalse(windows[1].carry)
         self.assertEqual(windows[1].shot["audio"], "source")
+
+    def test_source_shots_carry_only_where_the_same_video_left_off(self):
+        def source(start, frames):
+            return {"kind": "source", "frames": frames, "continue": True, "source": {"media": {"filename": "v.mp4"}, "start": start}}
+        windows = project.plan_windows(build(source(0, 39), source(39, 34), source(90, 40)))
+        self.assertEqual([w.carry for w in windows], [False, True, False])
+        self.assertEqual([(w.head, w.gen, w.keep) for w in windows[:2]], [(0, 39, 39), (22, 56, 34)])
+        # The previous window must end on its own last frame: 40 frames pad to 56, so the next shot joins without carrying.
+        windows = project.plan_windows(build(source(0, 40), source(40, 30)))
+        self.assertFalse(windows[1].carry)
+        # Source shots continue only when asked.
+        windows = project.plan_windows(build(source(0, 39), {"kind": "source", "frames": 30, "source": {"media": {"filename": "v.mp4"}, "start": 39}}))
+        self.assertFalse(windows[1].carry)
 
     def test_global_references_come_first_and_can_be_switched_off(self):
         image = lambda name: {"filename": name}
@@ -106,6 +119,15 @@ class WindowTests(unittest.TestCase):
         shot = {"frames": 30, "details": [{"box": [0.1, 0.1, 0.3, 0.3]}]}
         self.assertEqual(len(build(shot)["shots"][0]["details"]), 1)
         self.assertEqual(build(shot, settings={"detail": False})["shots"][0]["details"], [])
+
+    def test_a_cover_shows_a_frame_of_a_shot_that_still_exists(self):
+        source = {"media": {"filename": "v.mp4"}, "start": 0}
+        cover = lambda still: {"id": "c", "kind": "source", "frames": 2, "source": source, "still": still}
+        shot = {"id": "s", "kind": "source", "frames": 40, "source": {**source, "start": 2}}
+        stills = [build(cover(still), shot)["shots"][0]["still"]
+                  for still in ({"shot": "s", "frame": 30}, {"shot": "s", "frame": 99}, {"shot": "gone", "frame": 3}, {"shot": "c", "frame": 0})]
+        self.assertEqual(stills, [{"shot": "s", "frame": 30}, {"shot": "s", "frame": 39}, None, None])
+        self.assertIsNone(build({"id": "g", "frames": 10, "still": {"shot": "s"}}, shot)["shots"][0]["still"])
 
     def test_overlap_snaps_down_to_the_latent_grid(self):
         self.assertEqual(build({"frames": 10}, settings={"overlap": "30"})["overlap"], 22)

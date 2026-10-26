@@ -139,12 +139,62 @@ class RenderTests(unittest.TestCase):
         (call,) = self.fake.calls
         self.assertEqual((call["steps"], call["start"]), (6, 0.6))
         self.assertEqual(call["video_mask"][0, 0, 0, 0].tolist(), [1.0] * 4 + [0.0] * 4)
+        # The grid pads 30 frames to 39; the layer runs to the shot's end, so the frames after it regenerate too, and
+        # they hold the shot's last source frame instead of reading on into the clip.
+        self.assertEqual(call["video_mask"][0, 0, :, 0, 0].tolist(), [1.0] * call["video_mask"].shape[2])
+        padded = job.source_frames(job.windows[0], 128, 64)
+        self.assertTrue(torch.equal(padded[30:], padded[29:30].expand(9, -1, -1, -1)))
         self.assertEqual(call["audio_mask"].abs().sum().item(), 0.0)
         frames = director.output.read_frames(job.keys[0]["frames"])
         expected = job.source_frames(job.windows[0], 128, 64)[:30]
         self.assertTrue(torch.allclose(frames[:, :, 64:], expected[:, :, 64:], atol=1 / 255))
         self.assertFalse(torch.allclose(frames[:, :, :64], expected[:, :, :64], atol=0.02))
         self.assertAlmostEqual(self.probe(path)[1], 30 / 24, delta=0.05)
+
+    def test_continued_source_edit_opens_on_the_previous_result(self):
+        write_video(self.root / "input" / "clip.mp4", 96, 128, 64, audio_seconds=4)
+        mask = png(self.root / "input" / "mask.png", 0, left_half=True)
+        clip = {"filename": "clip.mp4", "subfolder": "", "type": "input"}
+        layer = lambda: {"mask": mask, "strength": 1.0, "grow": 0, "feather": 0}
+        shots = [{"id": "a", "kind": "source", "frames": 39, "prompt": "一", "source": {"media": clip, "start": 6}, "repaints": [layer()]},
+                 {"id": "b", "kind": "source", "frames": 34, "prompt": "二", "continue": True, "source": {"media": clip, "start": 45},
+                  "repaints": [layer()]}]
+        job, path = self.run_project({"shots": shots})
+        a, b = job.windows
+        self.assertEqual((b.carry, b.head, a.keep), (True, 22, 39))
+        # b's window opens on the 22 source frames a ended on.
+        self.assertTrue(torch.equal(job.source_frames(b, 128, 64)[:22], job.source_frames(a, 128, 64)[17:39]))
+        # Its repaint keeps those tokens, and they are a's result, not the source.
+        tokens = render.video_latent_t(22)
+        first, second = (director.cache.read_tensors(keys["final"])["video"] for keys in job.keys)
+        self.assertTrue(torch.equal(second[:, :, :tokens], first[:, :, -tokens:]))
+        self.assertEqual(self.fake.calls[1]["video_mask"][0, 0, :tokens].abs().sum().item(), 0.0)
+        frames, seconds = self.probe(path)
+        self.assertEqual(frames, 73)
+        self.assertAlmostEqual(seconds, 73 / 24, delta=0.05)
+
+    def test_a_cover_shows_the_generated_frame_it_repeats(self):
+        write_video(self.root / "input" / "clip.mp4", 48, 128, 64)
+        clip = {"filename": "clip.mp4", "subfolder": "", "type": "input"}
+        shots = [{"id": "c", "kind": "source", "frames": 2, "source": {"media": clip, "start": 0}, "still": {"shot": "s", "frame": 20}},
+                 {"id": "s", "kind": "source", "frames": 30, "prompt": "改写", "source": {"media": clip, "start": 2, "regen": True}}]
+        job, path = self.run_project({"shots": shots}, ref_model="ref_model")
+        with av.open(str(path)) as container:
+            film = np.stack([frame.to_ndarray(format="rgb24") for frame in container.decode(video=0)]).astype(float)
+        # Both cover frames are frame 20 of the rewrite (the film's frame 22), not the clip's dark first frames.
+        self.assertLess(np.abs(film[:2] - film[22]).mean(), 2.0)
+        self.assertGreater(np.abs(film[0] - director.output.read_frames(job.keys[0]["frames"])[0].numpy() * 255).mean(), 20.0)
+
+    def test_continued_source_rewrite_carries_the_tail(self):
+        write_video(self.root / "input" / "clip.mp4", 96, 128, 64)
+        clip = {"filename": "clip.mp4", "subfolder": "", "type": "input"}
+        shots = [{"id": "a", "kind": "source", "frames": 39, "prompt": "一", "source": {"media": clip, "start": 0, "regen": True}},
+                 {"id": "b", "kind": "source", "frames": 34, "prompt": "二", "continue": True, "source": {"media": clip, "start": 39, "regen": True}}]
+        job, _ = self.run_project({"shots": shots}, ref_model="ref_model")
+        self.assertEqual(self.drift, [render.video_latent_t(22)])
+        self.assertEqual([call["model"] for call in self.fake.calls], ["ref_model", "ref_model"])
+        # The reference video of b starts on a's last 22 frames, in step with the carried head.
+        self.assertTrue(torch.equal(job.source_frames(job.windows[1], 128, 64)[:22], job.source_frames(job.windows[0], 128, 64)[17:39]))
 
     def test_source_rewrite_samples_its_own_sound_and_keeps_the_source_audio(self):
         # Locked to the source's audio, H3 follows the sound and drifts off the video it rewrites.
