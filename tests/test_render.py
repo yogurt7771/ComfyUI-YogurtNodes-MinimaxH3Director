@@ -244,7 +244,7 @@ class RenderTests(unittest.TestCase):
     def test_two_pass_lifts_in_latent_space_and_keeps_the_audio_path(self):
         folder = self.root / "latent_upscale_models"
         folder.mkdir()
-        tiny_upscaler(director, folder / "tiny.safetensors")
+        tiny_upscaler(folder / "tiny.safetensors")
         saved = folder_paths.folder_names_and_paths.get("latent_upscale_models")
         folder_paths.folder_names_and_paths["latent_upscale_models"] = ([str(folder)], {".safetensors"})
         shots = [{"id": "a", "frames": 30, "prompt": "一"}, {"id": "b", "frames": 30, "prompt": "二"}]
@@ -345,6 +345,50 @@ class RenderTests(unittest.TestCase):
         base, again = self.fake.calls
         self.assertEqual((base["shape"][-2:], again["shape"][-2:], again["start"]), ((4, 8), (4, 8), 0.35))
         self.assertEqual(job.m.vae.encoded, [])
+
+    def test_rerender_lora_patches_only_the_rerender_model_once_per_run(self):
+        loras = self.root / "loras"
+        loras.mkdir()
+        import safetensors.torch
+        safetensors.torch.save_file({"lora.weight": torch.zeros(1)}, str(loras / "regen.safetensors"))
+        saved_folder, saved_load = folder_paths.folder_names_and_paths.get("loras"), render.comfy.sd.load_lora_for_models
+        folder_paths.folder_names_and_paths["loras"] = ([str(loras)], {".safetensors"})
+        patched = []
+        render.comfy.sd.load_lora_for_models = lambda model, clip, lora, strength, strength_clip: patched.append((model, strength)) or (f"{model}+lora", None)
+        shots = [{"id": "a", "frames": 30, "prompt": "一"}, {"id": "b", "frames": 30, "prompt": "二"}]
+        settings = {"two_pass": True, "two_pass_steps": 2, "rerender": True, "rerender_steps": 2, "rerender_denoise": 0.71,
+                    "rerender_lora": "regen.safetensors", "rerender_lora_strength": 0.8, "width": 256, "height": 128}
+        try:
+            job, _ = self.run_project({"shots": shots}, settings)
+            base_a, base_b, tail_a, tail_b, again_a, again_b = self.fake.calls
+            self.assertEqual([c["model"] for c in (base_a, tail_a, again_a, again_b)], ["model", "model", "model+lora", "model+lora"])
+            self.assertEqual(patched, [("model", 0.8)])
+            self.assertTrue(any("低噪重绘" in line and "LoRA regen.safetensors" in line for line in job.report))
+            # A LoRA name is a file name: one that is not in models/loras fails at the load, whatever the combo offered.
+            with self.assertRaises(FileNotFoundError):
+                self.run_project({"shots": shots}, {**settings, "rerender_lora": "missing.safetensors"})
+        finally:
+            folder_paths.folder_names_and_paths["loras"] = saved_folder
+            render.comfy.sd.load_lora_for_models = saved_load
+
+    @unittest.skipUnless(director.superres.VideoSuperRes is not None and torch.cuda.is_available(), "needs nvidia-vfx and an NVIDIA GPU")
+    def test_rtx_vsr_lifts_the_film_from_a_smaller_h3_canvas(self):
+        shots = [{"id": "a", "frames": 30, "prompt": "一"}]
+        settings = {"rerender": True, "rerender_scale": 2.0, "rerender_steps": 2, "rtx_vsr": True, "rtx_vsr_scale": 2.0,
+                    "width": 512, "height": 256}
+        job, path = self.run_project({"shots": shots}, settings)
+        base, again = self.fake.calls
+        # 512x256 film: RTX lifts it from 256x128, where the rerender ends; the draft is 128x64.
+        self.assertEqual((base["shape"][-2:], again["shape"][-2:]), ((4, 8), (8, 16)))
+        self.assertEqual((job.out_w, job.out_h), (256, 128))
+        self.assertIn("成片超分：RTX ULTRA 256×128 → 512×256", job.report)
+        with av.open(str(path)) as container:
+            stream = container.streams.video[0]
+            self.assertEqual((stream.width, stream.height, stream.frames), (512, 256, 30))
+            frame = next(container.decode(video=0)).to_ndarray(format="rgb24")
+        # The fake decoder paints flat colour; super resolution keeps it.
+        expected = director.output.read_frames(job.keys[0]["frames"])[0].mean((0, 1)) * 255
+        self.assertTrue(np.allclose(frame.reshape(-1, 3).mean(0), expected.numpy(), atol=3))
 
     def test_each_pass_lifts_by_its_own_scale_and_caches_on_its_own(self):
         shots = [{"id": "a", "frames": 30, "prompt": "一"}, {"id": "b", "frames": 30, "prompt": "二"}]

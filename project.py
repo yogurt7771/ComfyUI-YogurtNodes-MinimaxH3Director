@@ -11,6 +11,7 @@ import json
 from comfy_extras.nodes_minimax_h3 import align_frame_count
 
 from .latent_upscale import DEFAULT as LATENT_UPSCALER
+from .superres import QUALITIES as SUPERRES_QUALITIES
 
 FPS = 24
 OVERLAPS = (0, 5, 22, 39, 56)
@@ -51,6 +52,11 @@ SETTINGS = {
     "rerender_denoise": 0.35,
     "rerender_upscaler": "h3_latent",
     "rerender_latent_model": LATENT_UPSCALER,
+    "rerender_lora": "none",
+    "rerender_lora_strength": 1.0,
+    "rtx_vsr": False,
+    "rtx_vsr_scale": 2.0,
+    "rtx_vsr_quality": "ULTRA",
     "detail": True,
     "detail_steps": 8,
 }
@@ -261,7 +267,12 @@ def load_project(text, settings=None):
         "refine": {"two_pass": {"scale": _float(s["two_pass_scale"], 2.0, 1.0, 4.0), "steps": _int(s["two_pass_steps"], 2, 1, 200),
                                 **_upscaler(s, "two_pass")} if s["two_pass"] else None,
                    "rerender": {"scale": _float(s["rerender_scale"], 1.0, 1.0, 4.0), "steps": _int(s["rerender_steps"], 2, 1, 200),
-                                "denoise": _float(s["rerender_denoise"], 0.35, 0.05, 1.0), **_upscaler(s, "rerender")} if s["rerender"] else None},
+                                "denoise": _float(s["rerender_denoise"], 0.35, 0.05, 1.0), **_upscaler(s, "rerender"),
+                                "lora": None if s["rerender_lora"] in (None, "", "none") else str(s["rerender_lora"]),
+                                "lora_strength": _float(s["rerender_lora_strength"], 1.0, -4.0, 4.0)} if s["rerender"] else None},
+        # 成片超分 (RTX VSR) lifts the decoded film by its scale to width x height; H3 works at the size it starts from.
+        "superres": {"scale": _float(s["rtx_vsr_scale"], 2.0, 1.0, 4.0),
+                     "quality": s["rtx_vsr_quality"] if s["rtx_vsr_quality"] in SUPERRES_QUALITIES else "ULTRA"} if s["rtx_vsr"] else None,
         "detail": {"steps": _int(s["detail_steps"], 8, 1, 200)},
     }
     project["shots"] = [_shot(raw, i, project["refs"]) for i, raw in enumerate(data.get("shots") or []) if isinstance(raw, dict)]

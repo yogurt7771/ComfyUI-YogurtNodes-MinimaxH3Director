@@ -16,33 +16,10 @@ Copyright (c) 2026 Yogurt. Distributed under the GNU General Public License v3.0
 - `h3-prompt-writing/` is MiniMax's H3 prompt-writing guide under the MiniMax H3 Community License
   (see that folder's LICENSE / NOTICE); it is not covered by this plugin's GPL-3.0.
 
-- `latent_upscale.py` ports the LatentResizer3D network of
-  [LBH-123-AI/Comfyui_Minimax_h3_latent_Upscaler](https://github.com/LBH-123-AI/Comfyui_Minimax_h3_latent_Upscaler)
-  (MIT, notice below). Its weights are not bundled: they are downloaded on first use from
-  [LBH-123-AI/Minimax_h3_latent_Upscaler](https://huggingface.co/LBH-123-AI/Minimax_h3_latent_Upscaler) into `models/latent_upscale_models`.
+- `latent_upscale.py` runs ComfyUI's own MiniMax H3 latent upscaler on the weights of
+  [LBH-123-AI/Minimax_h3_latent_Upscaler](https://huggingface.co/LBH-123-AI/Minimax_h3_latent_Upscaler). They are not
+  bundled: they are downloaded on first use into `models/latent_upscale_models`.
+- `superres.py` calls NVIDIA's `nvidia-vfx` (RTX Video Super Resolution, proprietary NVIDIA license), which the user
+  installs separately.
 
 Conditioning uses ComfyUI's native MiniMax H3 implementation; no third-party weights are bundled.
-
-```
-MIT License
-
-Copyright (c) 2026 LBH-123-AI
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
-```

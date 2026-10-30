@@ -196,10 +196,10 @@
         "Node name for S&R": "VAELoader"
       },
       "widgets_values": [
-        "minimax_h3_video_vae_fp16.safetensors"
+        "minimax_h3_video_vae_int8_convrot.safetensors"
       ],
       "widgets_values_named": {
-        "vae_name": "minimax_h3_video_vae_fp16.safetensors"
+        "vae_name": "minimax_h3_video_vae_int8_convrot.safetensors"
       }
     },
     {
@@ -648,7 +648,12 @@
         "h3_latent",
         "minimax_h3_latent_upscaler_3d_conv_v1_fp16.safetensors",
         true,
-        3
+        3,
+        "none",
+        1.0,
+        false,
+        2.0,
+        "ULTRA"
       ],
       "widgets_values_named": {
         "seed": 0,
@@ -676,7 +681,12 @@
         "rerender_upscaler": "h3_latent",
         "rerender_latent_model": "minimax_h3_latent_upscaler_3d_conv_v1_fp16.safetensors",
         "detail": true,
-        "detail_steps": 3
+        "detail_steps": 3,
+        "rerender_lora": "none",
+        "rerender_lora_strength": 1.0,
+        "rtx_vsr": false,
+        "rtx_vsr_scale": 2.0,
+        "rtx_vsr_quality": "ULTRA"
       }
     },
     {

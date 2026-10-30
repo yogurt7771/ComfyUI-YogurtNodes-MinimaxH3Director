@@ -1,13 +1,15 @@
 """Director render: cache keys and needs first, then encode / sample / decode work grouped by model.
 
 Stages per shot: base (generate, or encode the source video) -> repaint layers -> 二采 refine ->
-decoded frames -> 局部精修 crops -> assembly. With 二采 the base and repaints run on a draft canvas and each pass that
-is on lifts every shot by its own scale, then samples it there, in this order: two-pass stops the draft before the
-last steps of its schedule and runs those steps on its canvas, the low-noise rerender resamples the result from a low
-noise level; the last pass ends at the output size. Every stage result is cached under a key over everything that
-affects it, so editing one shot re-runs that shot and the shots continuing from it, nothing else.
+decoded frames -> 局部精修 crops -> assembly (成片超分 here). With 二采 the base and repaints run on a draft canvas and each
+pass that is on lifts every shot by its own scale, then samples it there, in this order: two-pass stops the draft before
+the last steps of its schedule and runs those steps on its canvas, the low-noise rerender resamples the result from a
+low noise level; the last pass ends at the output size, which 成片超分 (RTX VSR) lifts to the film size. Every stage
+result is cached under a key over everything that affects it, so editing one shot re-runs that shot and the shots
+continuing from it, nothing else.
 """
 
+from contextlib import nullcontext
 from dataclasses import dataclass
 import functools
 import json
@@ -19,13 +21,15 @@ from PIL import Image
 import torch
 
 import comfy.model_management
+import comfy.sd
+import comfy.utils
 import folder_paths
 from comfy_api.latest import InputImpl
 from comfy_extras.nodes_minimax_h3 import _encode_ref_audio, align_frame_count, temporal_shape, video_latent_t
 from comfy_extras.nodes_upscale_model import ImageUpscaleWithModel
 from server import PromptServer
 
-from . import cache, detail, latent_upscale, sampling, segment
+from . import cache, detail, latent_upscale, sampling, segment, superres
 from .cache import digest
 from .conditioning import encode_keyframes, encode_text, shot_conditioning
 from .continuation import carry_latent_tail, install_drift_control
@@ -91,7 +95,10 @@ class Render:
     def __init__(self, node_id, prompt, project, models, media, settings, report=()):
         self.node_id, self.project, self.m, self.media = node_id, project, models, media
         self.windows = plan_windows(project)
-        self.out_w, self.out_h = project["width"], project["height"]
+        self.film_w, self.film_h = project["width"], project["height"]
+        # out is the size H3 ends on: the film divided by the 成片超分 scale that lifts it there (1 without it).
+        scale = project["superres"]["scale"] if project["superres"] else 1.0
+        self.out_w, self.out_h = _round32(self.film_w / scale), _round32(self.film_h / scale)
         refine = project["refine"]
         self.passes = [(kind, refine[kind]) for kind in ("two_pass", "rerender") if refine[kind]]
         self.refine = refine if self.passes else None
@@ -114,6 +121,7 @@ class Render:
         self.final, self.refined, self.conds, self.keyframes, self.detail_conds = {}, {}, {}, {}, {}
         # Two-pass drafts keep the noise their generated audio was on, so the full-size pass continues that path.
         self.audio_noise = {}
+        self.lora_models = {}
 
     def event(self, index, stage):
         send_event(self.node_id, self.windows[index].shot["id"], stage)
@@ -142,6 +150,14 @@ class Render:
 
     def shot_model(self, shot):
         return self.m.ref_model if self.uses_refs(shot) and self.m.ref_model is not None else self.m.model
+
+    def with_lora(self, model, settings):
+        """``model`` with the rerender's LoRA from models/loras, patched once per run and model."""
+        key = (id(model), settings["lora"], settings["lora_strength"])
+        if key not in self.lora_models:
+            lora = comfy.utils.load_torch_file(folder_paths.get_full_path_or_raise("loras", settings["lora"]), safe_load=True)
+            self.lora_models[key] = comfy.sd.load_lora_for_models(model, None, lora, settings["lora_strength"], 0)[0]
+        return self.lora_models[key]
 
     def tail_steps(self, shot):
         """Steps of the shot's schedule that two-pass 二采 leaves for its own canvas (0: the draft runs them all)."""
@@ -497,6 +513,8 @@ class Render:
                     seed = self.seed(shot["id"], shot["seed"])
                 else:
                     self.event(i, "rerendering")
+                    if settings["lora"]:
+                        model = self.with_lora(model, settings)
                     name, sigmas = "低噪重绘", sampling.schedule(model, settings["steps"], m.scheduler, settings["denoise"])
                     free_audio, audio_noise = False, None
                     # Its own seed: after two-pass the shot's seed would add back the exact noise the tail started from.
@@ -508,7 +526,8 @@ class Render:
                 positive, negative = self.conds[i].conds(shot["prompt"], keyframes)
                 latent = {"samples": sampling.sample(model, positive, negative, m.cfg, m.sampler, sigmas, latent, seed, audio_noise=audio_noise)}
                 size = f"{w1}×{h1}" if (w0, h0) == (w1, h1) else f"{w0}×{h0} → {w1}×{h1}"
-                self.report.append(f"第 {i + 1} 镜：{name} {size}（{sigmas.shape[-1] - 1} 步，从 {float(sigmas[0]):.2f} 起）")
+                lora = f"，LoRA {settings['lora']}" if kind == "rerender" and settings["lora"] else ""
+                self.report.append(f"第 {i + 1} 镜：{name} {size}（{sigmas.shape[-1] - 1} 步，从 {float(sigmas[0]):.2f} 起{lora}）")
             _store(self.keys[i]["passes"][p], latent)
             out[i] = latent
         return out
@@ -628,28 +647,36 @@ class Render:
     def assemble(self, filename_prefix):
         total = sum(w.keep for w in self.windows)
         folder, filename, counter, subfolder, _ = folder_paths.get_save_image_path(
-            filename_prefix, folder_paths.get_output_directory(), self.out_w, self.out_h)
+            filename_prefix, folder_paths.get_output_directory(), self.film_w, self.film_h)
         name = f"{filename}_{counter:05}_.mp4"
         path = os.path.join(folder, name)
         temporary = path + ".partial"
         waveform = torch.zeros((2, round(total * AUDIO_RATE / FPS)))
-        writer = Mp4Writer(temporary, self.out_w, self.out_h, AUDIO_RATE)
+        writer = Mp4Writer(temporary, self.film_w, self.film_h, AUDIO_RATE)
+        sr = self.project["superres"]
+        if sr:
+            self.report.append(f"成片超分：RTX {sr['quality']} {self.out_w}×{self.out_h} → {self.film_w}×{self.film_h}")
         try:
-            for window in self.windows:
-                still = window.shot["still"]
-                if still:
-                    shown = self.shot_frames(next(w for w in self.windows if w.shot["id"] == still["shot"]))
-                    frames = shown[min(still["frame"], shown.shape[0] - 1)][None].expand(window.keep, -1, -1, -1)
-                else:
-                    frames = self.shot_frames(window)
-                writer.write(frames)
-                wave, at = self.shot_audio(window)
-                lo, hi = round(at * AUDIO_RATE / FPS), round((window.start + window.keep) * AUDIO_RATE / FPS)
-                waveform[:, lo:hi] = 0.0
-                if wave is not None:
-                    count = min(hi - lo, wave.shape[-1])
-                    waveform[:, lo:lo + count] = wave[:, :count]
-                self.event(window.index, "complete")
+            with superres.upscaler(sr["quality"], self.film_w, self.film_h) if sr else nullcontext(lambda frames: frames) as finish:
+                for window in self.windows:
+                    still = window.shot["still"]
+                    if still:
+                        shown = self.shot_frames(next(w for w in self.windows if w.shot["id"] == still["shot"]))
+                        writer.write(finish(shown[min(still["frame"], shown.shape[0] - 1)][None]).expand(window.keep, -1, -1, -1))
+                    else:
+                        frames = self.shot_frames(window)
+                        if sr:
+                            self.event(window.index, "superres")
+                        # A chunk at a time, so the film-size frames of a long shot are never all in memory.
+                        for a in range(0, frames.shape[0], 16):
+                            writer.write(finish(frames[a:a + 16]))
+                    wave, at = self.shot_audio(window)
+                    lo, hi = round(at * AUDIO_RATE / FPS), round((window.start + window.keep) * AUDIO_RATE / FPS)
+                    waveform[:, lo:hi] = 0.0
+                    if wave is not None:
+                        count = min(hi - lo, wave.shape[-1])
+                        waveform[:, lo:lo + count] = wave[:, :count]
+                    self.event(window.index, "complete")
             writer.finish(waveform)
         except BaseException:
             writer.abort()

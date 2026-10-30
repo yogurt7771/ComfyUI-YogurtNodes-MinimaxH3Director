@@ -33,7 +33,8 @@
 - **五类镜头**：文生、首尾帧 / 关键帧、参考生成、源视频局部改写、源视频整体改写，同一部片里任意组合。
 - **无缝续接**：上一镜音画 latent 的尾部拷进下一镜开头并逐步释放（Drift-Control），画面和声音都连续。
 - **局部重绘**：遮罩可以手绘、连线、用一句英文让 SAM 3 跟踪、跟随人脸或固定框；原位重绘，或裁出来放大重绘再贴回。
-- **二采**：两段式（同一调度表的最后几步在大画幅上跑完）和低噪重绘，各自的倍数和放大方式，可以叠加。
+- **二采**：两段式（同一调度表的最后几步在大画幅上跑完）和低噪重绘，各自的倍数和放大方式，可以叠加；低噪重绘可以在节点上直接挂精修 LoRA（如 Open-H3-Regenerate-2K）。
+- **成片超分**：最后用 NVIDIA RTX Video Super Resolution 把成片放大到目标尺寸，124 帧不到 1 秒。
 - **剧情改写**：只写剧情，deepagents 按 MiniMax 官方 h3-prompt-writing 技能逐镜写出完整的 H3 提示词。
 - **只重跑改动**：每个阶段按内容缓存，改哪一镜就只重跑哪一镜和续接它的镜头。
 
@@ -46,13 +47,14 @@ cd ComfyUI/custom_nodes
 git clone https://github.com/yogurt7771/ComfyUI-YogurtNodes-MinimaxH3Director
 ```
 
-需要自带 MiniMax H3 节点的 ComfyUI（在 0.42.0 上测试）。插件本身没有额外依赖，下面三项按需安装：
+需要自带 MiniMax H3 节点和 H3 latent 放大支持的 ComfyUI（2026-10-28 之后的 master，0.43.1 之后的版本；在 0.43.0-17 上测试）。插件本身没有额外依赖，下面几项按需安装：
 
 | 功能 | 需要 |
 | --- | --- |
 | 剧情自动改写 | `pip install deepagents`（见[剧情改写](#剧情改写)） |
 | 局部重绘“跟随人脸” | `pip install ultralytics`，人脸检测模型放 `models/ultralytics/bbox/` |
 | 局部重绘“文字识别” | 自带 SAM 3 节点的 ComfyUI 和一个 SAM 3 检查点 |
+| 成片超分（RTX VSR） | NVIDIA RTX 显卡，`pip install nvidia-vfx --extra-index-url https://pypi.nvidia.com`（用运行 ComfyUI 的 Python） |
 
 ### 2. 准备模型
 
@@ -61,11 +63,12 @@ git clone https://github.com/yogurt7771/ComfyUI-YogurtNodes-MinimaxH3Director
 | H3 fl2va | `minimax_h3_fl2va_*` | `diffusion_models/` | UNETLoader → `model` |
 | H3 ref2va | `minimax_h3_ref2va_*` | `diffusion_models/` | UNETLoader → `ref_model`（带参考的镜头用） |
 | 文本编码器 | `qwen3vl_32b_minimax_h3_*` | `text_encoders/` | CLIPLoader，type 选 `minimax` → `clip` |
-| 视频 / 音频 VAE | `minimax_h3_video_vae_*` / `minimax_h3_audio_vae_*` | `vae/` | VAELoader → `vae` / `audio_vae` |
+| 视频 / 音频 VAE | `minimax_h3_video_vae_*` / `minimax_h3_audio_vae_*` | `vae/` | VAELoader → `vae` / `audio_vae`；`video_vae_int8_convrot` 解码快一倍多、画面一致，推荐 |
 | Turbo 加速 LoRA | [lightx2v/Minimax-h3-Turbo](https://huggingface.co/lightx2v/Minimax-h3-Turbo) 768p 8 步 | `loras/` | 示例默认开启，见[推荐设置](#推荐设置) |
 | SAM 3（可选） | `sam3.1_multiplex_fp16` | `checkpoints/` | CheckpointLoaderSimple → `sam3` / `sam3_clip` |
 | Fun ControlNet（可选） | `minimax_h3_fun_controlnet_union_2.0_*` | `model_patches/` | ModelPatchLoader → `inpaint_patch` |
 | H3 latent 放大（可选） | `minimax_h3_latent_upscaler_*` | `latent_upscale_models/` | 二采选 `h3_latent` 时首次使用自动下载 |
+| 精修 LoRA（可选） | [Open-H3-Regenerate-2K r128](https://huggingface.co/father558/H3-Open-Regenerate-2K-ComfyUI-r128) `minimax_h3_open_regenerate_2k_r128_comfyui_bf16` | `loras/` | 节点参数 `rerender_lora` 里选，见教程 4 |
 
 ### 3. 打开示例
 
@@ -150,11 +153,11 @@ git clone https://github.com/yogurt7771/ComfyUI-YogurtNodes-MinimaxH3Director
 > [!TIP]
 > SAM 3 认的是英文短语。中文目标在接了改写模型时会自动翻成英文，结果显示在输入框下面。多个目标用逗号分开，`cup:2` 表示最多取 2 个。目标小（脸、手、远处的物体）时勾上 **放大贴回**：在二采后的成片上把遮罩区域裁出来，放大到设定像素量重绘，再贴回去。
 
-### 教程 4　两段式二采 + 低噪重绘，出高清
+### 教程 4　二采与成片超分，出高清
 
 <img src="docs/images/node.webp" alt="导演台节点参数" width="330" align="right">
 
-二采在节点参数里设置。`width` × `height` 永远是成片尺寸，首采在按各遍倍数缩小的小画幅上进行。导演台顶栏会显示整条画幅链。
+二采和成片超分在节点参数里设置。`width` × `height` 永远是成片尺寸，首采在按各遍倍数缩小的小画幅上进行。导演台顶栏会显示整条画幅链。
 
 **两段式** `two_pass`：首采只跑调度表前面的步数，放大 `two_pass_scale` 倍后跑完最后 `two_pass_steps` 步，总步数不变。生成的声音沿首采自己的噪声轨迹继续，不重新加噪。
 
@@ -162,11 +165,16 @@ git clone https://github.com/yogurt7771/ComfyUI-YogurtNodes-MinimaxH3Director
 
 两遍可以单开，也可以同开（先两段式、再低噪重绘），各有放大方式和缓存，只改低噪重绘时不重跑两段式。
 
-| 例：1344×768 | 首采 | 两段式 | 低噪重绘 |
-| --- | --- | --- | --- |
-| 只开两段式（×2） | 672×384 · 6 步 | 1344×768 · 末 2 步 | — |
-| 两段式 ×2 + 低噪重绘 ×1 | 672×384 | 1344×768 | 1344×768 |
-| 两段式 ×2 + 低噪重绘 ×1.5 | 448×256 | 896×512 | 1344×768 |
+**精修 LoRA** `rerender_lora`：低噪重绘这一遍给模型挂一个 LoRA，放在 `models/loras/`。推荐 [Open-H3-Regenerate-2K](https://huggingface.co/Efficient-Large-Model/Open-H3-Regenerate-2K) 的 [r128 转换版](https://huggingface.co/father558/H3-Open-Regenerate-2K-ComfyUI-r128)，配 `rerender_denoise` 0.71、`rerender_steps` 2，就是官方的 0.7 两步噪声表；模型要是 shift 6（示例的 fl2va 分支）。它已合并 Turbo 和 Sharp，叠在挂了 Turbo 的模型上结果一样。比 0.35 的普通低噪重绘细节多、少一步，长相和颜色不变；不要用它默认的 0.91 起点，那会重画颜色和长相。带参考的镜头走 `ref_model`（shift 12），这个组合还没验证。
+
+**成片超分** `rtx_vsr`：最后用 NVIDIA RTX Video Super Resolution 把成片放大 `rtx_vsr_scale` 倍到 `width` × `height`，H3 在缩小后的画幅上生成。124 帧 2K 不到 1 秒，忠实于原画面但补的细节有限，适合在 H3 二采之后再放大一档。需要 RTX 显卡和 `nvidia-vfx`；开启后源视频镜头也会经过超分。
+
+| 例：成片 | 首采 | 两段式 | 低噪重绘 | 成片超分 |
+| --- | --- | --- | --- | --- |
+| 1344×768，只开两段式（×2） | 672×384 · 6 步 | 1344×768 · 末 2 步 | — | — |
+| 1344×768，两段式 ×2 + 低噪重绘 ×1 | 672×384 | 1344×768 | 1344×768 | — |
+| 1344×768，两段式 ×2 + 低噪重绘 ×1.5 | 448×256 | 896×512 | 1344×768 | — |
+| 2688×1536，低噪重绘 ×2 + Regenerate LoRA + 超分 ×2 | 672×384 | — | 1344×768 · 2 步 | 2688×1536 |
 
 放大方式：`h3_latent`（默认）用 [H3 latent 放大模型](https://huggingface.co/LBH-123-AI/Minimax_h3_latent_Upscaler)直接放大视频 latent，不经过 VAE；`lanczos` / `model` 走 VAE 解码 → 放大 → 编码。单镜可以在“镜头”页取消“参与二采”。
 
@@ -288,6 +296,8 @@ python -m pip install deepagents --no-deps
 | `two_pass_upscaler` · `_latent_model` | h3_latent · 默认权重 | 两段式的放大方式 |
 | `rerender` · `_scale` · `_steps` · `_denoise` | 关 · 1.0 · 2 · 0.35 | 低噪重绘 |
 | `rerender_upscaler` · `_latent_model` | h3_latent · 默认权重 | 低噪重绘的放大方式 |
+| `rerender_lora` · `_strength` | none · 1.0 | 低噪重绘这一遍挂的 LoRA（`models/loras/`） |
+| `rtx_vsr` · `_scale` · `_quality` | 关 · 2.0 · ULTRA | 成片超分（RTX VSR），H3 在成片尺寸 ÷ 倍数上生成 |
 | `detail` · `detail_steps` | 开 · 8 | 放大贴回的总开关和步数 |
 
 画幅、续接、二采这些是节点参数；镜头、参考、声音和剧本存在工程里，可以在导演台顶栏导入 / 导出 JSON。
@@ -304,11 +314,11 @@ flowchart TB
     end
     subgraph second [" "]
         direction LR
-        tp["两段式<br/>放大 → 末几步"] --> rr["低噪重绘<br/>放大 → 低噪重采"] --> dec["解码 · 源视频合成<br/>VAE"] --> crop["放大贴回<br/>裁剪 → 重绘 → 贴回"] --> mp4["成片 MP4<br/>H.264 + AAC"]
+        tp["两段式<br/>放大 → 末几步"] --> rr["低噪重绘<br/>放大 → 低噪重采"] --> dec["解码 · 源视频合成<br/>VAE"] --> crop["放大贴回<br/>裁剪 → 重绘 → 贴回"] --> sr["成片超分<br/>RTX VSR"] --> mp4["成片 MP4<br/>H.264 + AAC"]
     end
     first --> second
     classDef optional stroke-dasharray: 5 4
-    class seg,tp,rr,crop optional
+    class seg,tp,rr,crop,sr optional
     style first fill:none,stroke:none
     style second fill:none,stroke:none
 ```
@@ -330,7 +340,7 @@ flowchart TB
 `tests/` 用伪模型和真实媒体文件覆盖：
 
 - 规划、遮罩网格、缓存复用与局部重跑；
-- 续接与二采各遍；
+- 续接与二采各遍、低噪重绘的 LoRA、成片超分（没有 nvidia-vfx 或 NVIDIA 显卡时跳过）；
 - 源视频遮罩外像素保持；
 - 文字识别遮罩（用伪 SAM 3）、放大贴回只改遮罩内、识别预览；
 - 配乐锁定、输出帧数和时长。

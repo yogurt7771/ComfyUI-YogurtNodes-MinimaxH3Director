@@ -12,7 +12,7 @@ from comfy_api.latest import io
 from . import latent_upscale
 from .cache import digest
 from .media import Media
-from .project import DEFAULT_PROJECT, OVERLAPS, REFINE_UPSCALERS, SETTINGS, load_project, plan_windows
+from .project import DEFAULT_PROJECT, OVERLAPS, REFINE_UPSCALERS, SETTINGS, SUPERRES_QUALITIES, load_project, plan_windows
 from .render import Models, Render, send_event
 from .rewrite import Rewriter, english_targets, rewrite_project
 
@@ -112,8 +112,8 @@ class YogurtH3Director(io.ComfyNode):
                 io.String.Input("filename_prefix", default="yogurt_h3/director"),
                 io.String.Input("project", multiline=True, default=json.dumps(DEFAULT_PROJECT, ensure_ascii=False),
                                 tooltip="导演台工程，由节点里的时间线编辑器写入。"),
-                io.Int.Input("width", default=SETTINGS["width"], min=64, max=4096, step=32, tooltip="成片宽度（32 的倍数）；开二采时首采按各遍的放大倍数缩小。"),
-                io.Int.Input("height", default=SETTINGS["height"], min=64, max=4096, step=32, tooltip="成片高度（32 的倍数）；开二采时首采按各遍的放大倍数缩小。"),
+                io.Int.Input("width", default=SETTINGS["width"], min=64, max=4096, step=32, tooltip="成片宽度（32 的倍数）；开二采或成片超分时首采按各遍的放大倍数缩小。"),
+                io.Int.Input("height", default=SETTINGS["height"], min=64, max=4096, step=32, tooltip="成片高度（32 的倍数）；开二采或成片超分时首采按各遍的放大倍数缩小。"),
                 io.Combo.Input("overlap", options=[str(v) for v in OVERLAPS], default=str(SETTINGS["overlap"]),
                                tooltip="续接重叠帧：勾选“接着上一镜”的镜头从上一镜最后这么多帧接着生成（22 帧约 0.92 秒）；0 关闭续接。"),
                 io.Combo.Input("ref_image_size", options=["match", "max"], default=SETTINGS["ref_image_size"],
@@ -133,12 +133,26 @@ class YogurtH3Director(io.ComfyNode):
                 io.Float.Input("rerender_scale", default=SETTINGS["rerender_scale"], min=1.0, max=4.0, step=0.125,
                                tooltip="低噪重绘的放大倍数：它的输入画幅 = width × height ÷ rerender_scale；1 = 不放大，在成片尺寸上重采。"),
                 io.Int.Input("rerender_steps", default=SETTINGS["rerender_steps"], min=1, max=200, tooltip="低噪重绘的步数。"),
-                io.Float.Input("rerender_denoise", default=SETTINGS["rerender_denoise"], min=0.05, max=1.0, step=0.05,
-                               tooltip="低噪重绘从多大的噪声开始（1 = 纯噪声），常用 0.25–0.4。"),
+                io.Float.Input("rerender_denoise", default=SETTINGS["rerender_denoise"], min=0.05, max=1.0, step=0.01,
+                               tooltip="低噪重绘从多大的噪声开始（1 = 纯噪声），常用 0.25–0.4；挂 Open-H3-Regenerate 精修 LoRA 时用 0.71。"),
                 *_upscaler_inputs("rerender", "低噪重绘"),
                 io.Boolean.Input("detail", default=SETTINGS["detail"],
                                  tooltip="放大贴回总开关：关掉时跳过所有打开“放大贴回”的局部重绘层。"),
                 io.Int.Input("detail_steps", default=SETTINGS["detail_steps"], min=1, max=200, tooltip="放大贴回的局部重绘层的采样步数。"),
+                # Newer widgets go last: saved workflows store widget values by position.
+                io.Combo.Input("rerender_lora", options=["none"] + folder_paths.get_filename_list("loras"), default=SETTINGS["rerender_lora"],
+                               tooltip="低噪重绘时挂在模型上的 LoRA（models/loras），只用于这一遍。\n"
+                                       "推荐 Open-H3-Regenerate-2K 的 r128 转换版（已合并 Turbo 与 Sharp，叠在挂了 Turbo 的模型上也一样）："
+                                       "rerender_denoise 0.71、rerender_steps 2，即官方 0.7 两步噪声表；模型的 shift 需为 6。"),
+                io.Float.Input("rerender_lora_strength", default=SETTINGS["rerender_lora_strength"], min=-4.0, max=4.0, step=0.05,
+                               tooltip="rerender_lora 的强度。"),
+                io.Boolean.Input("rtx_vsr", default=SETTINGS["rtx_vsr"],
+                                 tooltip="成片超分：最后用 NVIDIA RTX Video Super Resolution 把成片放大 rtx_vsr_scale 倍到 width × height，"
+                                         "H3 在 width × height ÷ rtx_vsr_scale 上生成。每帧几毫秒、忠实于原画面；需要 RTX 显卡和 nvidia-vfx。"),
+                io.Float.Input("rtx_vsr_scale", default=SETTINGS["rtx_vsr_scale"], min=1.0, max=4.0, step=0.125,
+                               tooltip="成片超分的倍数（1–4）：H3 生成画幅 = width × height ÷ rtx_vsr_scale。"),
+                io.Combo.Input("rtx_vsr_quality", options=list(SUPERRES_QUALITIES), default=SETTINGS["rtx_vsr_quality"],
+                               tooltip="RTX VSR 档位。ULTRA 细节最多；HIGHBITRATE_* 为干净无压缩的画面设计，改动最小。"),
                 io.Model.Input("ref_model", optional=True, lazy=True,
                                tooltip="MiniMax H3 ref2va 模型：带参考素材或改写源视频的镜头使用它；不接则用 model。"),
                 io.Model.Input("refine_model", optional=True, lazy=True, tooltip="二采与放大贴回使用的模型；不接则沿用镜头的模型。"),
@@ -215,4 +229,4 @@ class YogurtH3Director(io.ComfyNode):
         return io.NodeOutput(video, ui={"images": [saved], "animated": (True,),
                                         "yogurt_h3": [{"timeline": timeline, "report": render.report, "video": saved, "prompts": prompts,
                                                        "inputs": _input_previews(spec, media, cls.hidden.unique_id), "targets": targets,
-                                                       "size": [render.out_w, render.out_h]}]})
+                                                       "size": [render.film_w, render.film_h]}]})

@@ -6,7 +6,8 @@ export const FPS = 24;
 export const NODE = "YogurtH3Director";
 export const STAGES = {
     encoding: "编码条件", sampling: "生成中", repainting: "重绘中", upscaling: "放大中", refining: "二采中", rerendering: "低噪重绘中",
-    segmenting: "识别遮罩", decoding: "解码中", detailing: "放大贴回中", rewriting: "改写提示词", rewritten: "已改写", complete: "完成",
+    segmenting: "识别遮罩", decoding: "解码中", detailing: "放大贴回中", superres: "超分中", rewriting: "改写提示词", rewritten: "已改写",
+    complete: "完成",
 };
 
 export const align = n => { n = Math.max(5, Math.round(n)); while (n % 17 !== 5) n++; return n; };
@@ -102,8 +103,9 @@ export const totalFrames = project => planWindows(project).reduce((sum, w) => su
 
 export const widget = (node, name) => node.widgets?.find(w => w.name === name);
 
-// Canvas, overlap, refine and the detail switch are node widgets; the editor reads them next to the shots but never stores them.
-const WIDGET_KEYS = ["width", "height", "overlap", "refine", "detail"];
+// Canvas, overlap, refine, super resolution and the detail switch are node widgets; the editor reads them next to the shots
+// but never stores them.
+const WIDGET_KEYS = ["width", "height", "overlap", "refine", "superres", "detail"];
 
 export function readProject(node) {
     let project;
@@ -112,6 +114,7 @@ export function readProject(node) {
     return { ...project, width: value("width"), height: value("height"), overlap: Number(value("overlap")),
         refine: { enabled: Boolean(value("two_pass") || value("rerender")), twoPass: value("two_pass") && value("two_pass_scale"),
             rerender: value("rerender") && value("rerender_scale") },
+        superres: value("rtx_vsr") && value("rtx_vsr_scale"),
         detail: { enabled: value("detail") } };
 }
 

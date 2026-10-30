@@ -28,21 +28,17 @@ class LatentUpscaleTests(unittest.TestCase):
         self.tmp.cleanup()
 
     def test_upscale_reaches_the_target_grid_and_keeps_time(self):
-        tiny_upscaler(director, self.folder / "tiny.safetensors")
+        tiny_upscaler(self.folder / "tiny.safetensors")
         patcher = lu.load("tiny.safetensors")
-        for frames in (6, 40):  # 40 latent frames runs in overlapping temporal chunks
+        for frames in (6, 40):  # 40 latent frames spans several of the core network's temporal slabs
             video = torch.randn(1, 24, frames, 4, 8)
             out = lu.upscale(patcher, video, 8, 16)
             self.assertEqual((tuple(out.shape), out.dtype), ((1, 24, frames, 8, 16), torch.float32))
             self.assertTrue(torch.isfinite(out).all())
 
-    def test_missing_or_foreign_files_fail_clearly(self):
+    def test_missing_files_fail_clearly(self):
         with self.assertRaisesRegex(FileNotFoundError, "找不到 latent 放大模型"):
             lu.load("other.safetensors")
-        import safetensors.torch
-        safetensors.torch.save_file({"weight": torch.zeros(2)}, str(self.folder / "foreign.safetensors"))
-        with self.assertRaisesRegex(ValueError, "不是 MiniMax H3 3D latent 放大模型"):
-            lu.load("foreign.safetensors")
 
     def test_download_lands_only_after_the_checksum_matches(self):
         payload = b"h3 latent upscaler" * 4096

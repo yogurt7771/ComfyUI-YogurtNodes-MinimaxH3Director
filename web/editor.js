@@ -506,12 +506,12 @@ class Editor {
         const round32 = v => { const q = v / 32, f = Math.floor(q); return Math.max(64, (q - f === 0.5 ? f + (f % 2) : Math.round(q)) * 32); };
         let size = [p.width, p.height];
         const chain = [];
-        for (const [name, scale] of [["低噪重绘", p.refine.rerender], ["两段式", p.refine.twoPass]]) {
+        for (const [name, scale] of [["RTX 超分", p.superres], ["低噪重绘", p.refine.rerender], ["两段式", p.refine.twoPass]]) {
             if (!scale) continue;
             chain.unshift(`${name} ${size.join("×")}`);
             size = size.map(v => round32(v / scale));
         }
-        const refine = chain.length ? ` · 二采：首采 ${size.join("×")} → ${chain.join(" → ")}` : "";
+        const refine = chain.length ? ` · 画幅：首采 ${size.join("×")} → ${chain.join(" → ")}` : "";
         this.meta.textContent = `${p.width}×${p.height}${refine} · ${p.shots.length} 镜 · ${secs(total)} · 24fps`;
     }
 

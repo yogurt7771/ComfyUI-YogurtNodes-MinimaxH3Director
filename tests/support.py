@@ -126,11 +126,13 @@ class FakeSampler:
         return torch.full_like(last["x0"].unbind()[1], sigma)
 
 
-def tiny_upscaler(module, path):
-    """A random 32-channel LatentResizer3D checkpoint, small enough for tests."""
+def tiny_upscaler(path):
+    """A random 32-channel MiniMax H3 latent upscaler checkpoint (the LBH layout ComfyUI loads), small enough for tests."""
     import safetensors.torch
+    import comfy.ops
+    from comfy.ldm.minimax.latent_upscaler import MiniMaxH3LatentUpscaler
 
-    model = module.latent_upscale.LatentResizer3D(24, 32, 2, 2, 5, dtype=torch.float32)
+    model = MiniMaxH3LatentUpscaler(24, 32, 2, 2, 5, dtype=torch.float32, device="cpu", operations=comfy.ops.manual_cast)
     generator = torch.Generator().manual_seed(0)
     for parameter in model.parameters():
         parameter.data = torch.randn(parameter.shape, generator=generator) * 0.02

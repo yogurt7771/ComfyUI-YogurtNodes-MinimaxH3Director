@@ -174,6 +174,25 @@ class MaskTests(unittest.TestCase):
         self.assertGreater(float(sigmas[0]), 0.3)
         self.assertAlmostEqual(float(sampling.schedule(model, 6, "simple", 1.0)[0]), 1.0, places=3)
 
+    def test_regenerate_lora_settings_reach_the_official_two_step_grid(self):
+        import comfy.model_sampling
+
+        class Flow(comfy.model_sampling.ModelSamplingDiscreteFlow, comfy.model_sampling.CONST):
+            pass
+
+        flow = Flow()
+        flow.set_parameters(shift=6.0, multiplier=1000)
+        model = type("Model", (), {"get_model_object": lambda self, name: flow})()
+        # Open-H3-Regenerate's 2-step grid is 0.7, 0.494, 0; rerender_denoise 0.71 / 2 steps at shift 6 lands next to it.
+        self.assertEqual([round(float(s), 2) for s in sampling.schedule(model, 2, "simple", 0.71)], [0.71, 0.5, 0.0])
+
+    def test_rerender_lora_and_superres_settings(self):
+        spec = build({"id": "a"}, settings={"rerender": True, "rerender_lora": "none", "rtx_vsr": True, "rtx_vsr_scale": 9,
+                                            "rtx_vsr_quality": "BOGUS"})
+        self.assertEqual((spec["refine"]["rerender"]["lora"], spec["superres"]), (None, {"scale": 4.0, "quality": "ULTRA"}))
+        spec = build({"id": "a"}, settings={"rerender": True, "rerender_lora": "MinimaxH3\\regen.safetensors"})
+        self.assertEqual((spec["refine"]["rerender"]["lora"], spec["superres"]), ("MinimaxH3\\regen.safetensors", None))
+
     def test_custom_sigmas_keep_the_denoise_tail(self):
         custom = torch.linspace(1, 0, 9)
         self.assertEqual(sampling.schedule(None, 0, "simple", 0.5, custom).tolist(), custom[-5:].tolist())
