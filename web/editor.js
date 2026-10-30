@@ -871,13 +871,15 @@ class Editor {
                 this.check(this.splitting, "cover", "识别开头的封面帧（单独成一镜不参与生成，成片里换成它重复的那一帧的生成结果）")));
         }
         const source = shot.kind === "source";
+        const keepsPixels = source && !shot.source.regen;
         if (!first && (!source || follows(this.project.shots[this.selected - 1], shot))) {
             parts.push(h("div.field", {}, this.check(shot, "continue", source ? "接着上一镜的源视频续接（latent 续接，接缝处人物与画面连贯）"
                 : "接着上一镜继续拍（latent 续接，画面与声音连贯）", () => this.commit(true)),
                 !w.carry && shot.continue ? h("span.warn", {}, source ? "上一镜的生成长度不在 17k+5 上或工程关闭了续接，本镜直接接上。"
-                    : "上一镜过短或工程关闭了续接，本镜将硬切开始。") : null));
+                    : "上一镜过短或工程关闭了续接，本镜将硬切开始。") : null,
+                w.carry && !keepsPixels && !rewritable(this.project, shot) ? h("span.dim", {},
+                    "提示词开头先写上一镜结尾的画面（景别、机位、人物在做什么），再写新动作，整段只写一个 [Shot 1]；对不上时 H3 会在接缝附近自己切镜。") : null));
         }
-        const keepsPixels = shot.kind === "source" && !shot.source.regen;
         if (this.project.rewrite.enabled && !keepsPixels) {
             parts.push(this.check(shot, "rewrite", "本镜自动改写（取消则直接使用下面的提示词）", () => this.commit(true)));
         }
