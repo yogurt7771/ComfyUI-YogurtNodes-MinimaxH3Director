@@ -193,6 +193,14 @@ class MaskTests(unittest.TestCase):
         spec = build({"id": "a"}, settings={"rerender": True, "rerender_lora": "MinimaxH3\\regen.safetensors"})
         self.assertEqual((spec["refine"]["rerender"]["lora"], spec["superres"]), ("MinimaxH3\\regen.safetensors", None))
 
+    def test_width_and_height_are_the_draft_each_pass_lifts(self):
+        spec = build({"id": "a"}, settings={"width": 608, "height": 352, "two_pass": True, "two_pass_scale": 1.5, "rerender": True,
+                                            "rerender_scale": 1.5, "rtx_vsr": True, "rtx_vsr_scale": 2.0})
+        # On the 32 px grid with Python's round: 912 x 528 lands on 896 x 512.
+        self.assertEqual((spec["canvas"], spec["film"]), ([(608, 352), (896, 512), (1344, 768)], (2688, 1536)))
+        spec = build({"id": "a"}, settings={"width": 1344, "height": 768})
+        self.assertEqual((spec["canvas"], spec["film"]), ([(1344, 768)], (1344, 768)))
+
     def test_custom_sigmas_keep_the_denoise_tail(self):
         custom = torch.linspace(1, 0, 9)
         self.assertEqual(sampling.schedule(None, 0, "simple", 0.5, custom).tolist(), custom[-5:].tolist())

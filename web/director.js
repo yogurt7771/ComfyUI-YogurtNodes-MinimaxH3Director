@@ -2,7 +2,7 @@
 import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
 import {
-    FPS, NODE, PHASES, STAGES, changed, clamp, effectiveRefs, features, h, mediaLabel, mediaPreview, newShot, planWindows, readInputs, readProject,
+    FPS, NODE, PHASES, STAGES, changed, clamp, effectiveRefs, features, filmSize, h, mediaLabel, mediaPreview, newShot, planWindows, readInputs, readProject,
     rewritable, secs, storePrompts, totalFrames, widget, writeProject,
 } from "./core.js";
 import { openEditor } from "./editor.js";
@@ -242,7 +242,9 @@ class Panel {
         this.selected = clamp(this.selected, 0, project.shots.length - 1);
         const windows = planWindows(project), total = Math.max(1, totalFrames(project));
         const prompts = this.node.properties?.yh3Prompts || {};
-        this.meta.textContent = `${project.width}×${project.height} · ${project.shots.length} 镜 · ${secs(total)}`;
+        const film = filmSize(project), draft = [project.width, project.height];
+        const size = film.join("×") === draft.join("×") ? film.join("×") : `首采 ${draft.join("×")} → ${film.join("×")}`;
+        this.meta.textContent = `${size} · ${project.shots.length} 镜 · ${secs(total)}`;
         this.renderStrip();
         this.showRun();
         const shot = project.shots[this.selected], w = windows[this.selected];

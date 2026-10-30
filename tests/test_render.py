@@ -201,7 +201,7 @@ class RenderTests(unittest.TestCase):
         write_video(self.root / "input" / "clip.mp4", 48, 256, 128, audio_seconds=2)
         source = {"media": {"filename": "clip.mp4", "subfolder": "", "type": "input"}, "start": 6, "regen": True}
         shots = [{"id": "s", "kind": "source", "frames": 30, "prompt": "改写", "source": source}]
-        job, path = self.run_project({"shots": shots}, {"two_pass": True, "width": 256, "height": 128, "two_pass_scale": 2.0, "two_pass_steps": 2},
+        job, path = self.run_project({"shots": shots}, {"two_pass": True, "width": 128, "height": 64, "two_pass_scale": 2.0, "two_pass_steps": 2},
                                      ref_model="ref_model")
         base, refine = self.fake.calls
         self.assertEqual((base["audio_mask"].min().item(), refine["audio_mask"].min().item()), (1.0, 1.0))
@@ -213,7 +213,7 @@ class RenderTests(unittest.TestCase):
 
     def test_two_pass_refine_splits_one_schedule(self):
         shots = [{"id": "a", "frames": 30, "prompt": "一"}, {"id": "b", "frames": 30, "prompt": "二"}]
-        job, path = self.run_project({"shots": shots}, {"two_pass": True, "width": 256, "height": 128, "two_pass_scale": 2.0, "two_pass_steps": 2})
+        job, path = self.run_project({"shots": shots}, {"two_pass": True, "width": 128, "height": 64, "two_pass_scale": 2.0, "two_pass_steps": 2})
         base_a, base_b, refine_a, refine_b = self.fake.calls
         # 6 steps: the draft runs the first 4 at half size and lands on 0, the last 2 run at the output size.
         self.assertEqual((base_a["shape"][-2:], base_a["sigmas"]), ((4, 8), [1.0, 0.8333, 0.6667, 0.5, 0.0]))
@@ -231,7 +231,7 @@ class RenderTests(unittest.TestCase):
         source = {"media": {"filename": "clip.mp4", "subfolder": "", "type": "input"}, "start": 6}
         shots = [{"id": "s", "kind": "source", "frames": 30, "prompt": "改左边", "source": source,
                   "repaints": [{"mask": mask, "strength": 0.6, "grow": 0, "feather": 0}]}]
-        job, path = self.run_project({"shots": shots}, {"two_pass": True, "width": 256, "height": 128, "two_pass_scale": 2.0, "two_pass_steps": 2})
+        job, path = self.run_project({"shots": shots}, {"two_pass": True, "width": 128, "height": 64, "two_pass_scale": 2.0, "two_pass_steps": 2})
         repaint, refine = self.fake.calls
         self.assertEqual((repaint["shape"][-2:], repaint["start"]), ((4, 8), 0.6))
         self.assertEqual((refine["shape"][-2:], refine["sigmas"]), ((8, 16), [0.2, 0.1, 0.0]))
@@ -248,7 +248,7 @@ class RenderTests(unittest.TestCase):
         saved = folder_paths.folder_names_and_paths.get("latent_upscale_models")
         folder_paths.folder_names_and_paths["latent_upscale_models"] = ([str(folder)], {".safetensors"})
         shots = [{"id": "a", "frames": 30, "prompt": "一"}, {"id": "b", "frames": 30, "prompt": "二"}]
-        settings = {"two_pass": True, "width": 256, "height": 128, "two_pass_scale": 2.0, "two_pass_steps": 2,
+        settings = {"two_pass": True, "width": 128, "height": 64, "two_pass_scale": 2.0, "two_pass_steps": 2,
                     "two_pass_upscaler": "h3_latent", "two_pass_latent_model": "tiny.safetensors"}
         try:
             job, _ = self.run_project({"shots": shots}, settings)
@@ -270,7 +270,7 @@ class RenderTests(unittest.TestCase):
     def test_two_pass_references_keep_the_output_resolution(self):
         hero = png(self.root / "input" / "hero.png", 200, size=(256, 128))
         shots = [{"id": "a", "frames": 30, "prompt": "一", "refs": {"images": [hero]}}]
-        job, _ = self.run_project({"shots": shots}, {"two_pass": True, "width": 256, "height": 128, "two_pass_scale": 2.0, "two_pass_steps": 2})
+        job, _ = self.run_project({"shots": shots}, {"two_pass": True, "width": 128, "height": 64, "two_pass_scale": 2.0, "two_pass_steps": 2})
         base = self.fake.calls[0]
         self.assertEqual((base["shape"][-2:], base["refs"]), ((4, 8), ["image"]))
         # The reference is encoded at the 256x128 output size, not squeezed to the 128x64 draft.
@@ -301,13 +301,13 @@ class RenderTests(unittest.TestCase):
 
     def test_two_pass_shot_without_refine_runs_its_whole_schedule_on_the_draft(self):
         shots = [{"id": "a", "frames": 30, "prompt": "一", "refine": False}]
-        self.run_project({"shots": shots}, {"two_pass": True, "width": 256, "height": 128, "two_pass_scale": 2.0, "two_pass_steps": 2})
+        self.run_project({"shots": shots}, {"two_pass": True, "width": 128, "height": 64, "two_pass_scale": 2.0, "two_pass_steps": 2})
         (base,) = self.fake.calls
         self.assertEqual((base["shape"][-2:], base["steps"]), ((4, 8), 6))
 
     def test_rerender_resamples_every_shot_and_carries_the_refined_tail(self):
         shots = [{"id": "a", "frames": 30, "prompt": "一"}, {"id": "b", "frames": 30, "prompt": "二"}]
-        job, path = self.run_project({"shots": shots}, {"rerender": True, "width": 256, "height": 128, "rerender_scale": 2.0,
+        job, path = self.run_project({"shots": shots}, {"rerender": True, "width": 128, "height": 64, "rerender_scale": 2.0,
                                                         "rerender_steps": 4, "rerender_denoise": 0.5})
         base, refine_a, refine_b = self.fake.calls[0], self.fake.calls[2], self.fake.calls[3]
         self.assertEqual(base["shape"][-2:], (4, 8))
@@ -320,7 +320,7 @@ class RenderTests(unittest.TestCase):
     def test_two_pass_and_rerender_run_one_after_the_other(self):
         shots = [{"id": "a", "frames": 30, "prompt": "一"}, {"id": "b", "frames": 30, "prompt": "二"}]
         job, path = self.run_project({"shots": shots}, {"two_pass": True, "two_pass_steps": 2, "rerender": True, "rerender_steps": 4,
-                                                        "rerender_denoise": 0.5, "width": 256, "height": 128, "two_pass_scale": 2.0})
+                                                        "rerender_denoise": 0.5, "width": 128, "height": 64, "two_pass_scale": 2.0})
         # Pass by pass: every shot's two-pass, then every shot's rerender.
         base_a, base_b, tail_a, tail_b, again_a, again_b = self.fake.calls
         self.assertEqual((base_a["shape"][-2:], base_a["sigmas"]), ((4, 8), [1.0, 0.8333, 0.6667, 0.5, 0.0]))
@@ -357,7 +357,7 @@ class RenderTests(unittest.TestCase):
         render.comfy.sd.load_lora_for_models = lambda model, clip, lora, strength, strength_clip: patched.append((model, strength)) or (f"{model}+lora", None)
         shots = [{"id": "a", "frames": 30, "prompt": "一"}, {"id": "b", "frames": 30, "prompt": "二"}]
         settings = {"two_pass": True, "two_pass_steps": 2, "rerender": True, "rerender_steps": 2, "rerender_denoise": 0.71,
-                    "rerender_lora": "regen.safetensors", "rerender_lora_strength": 0.8, "width": 256, "height": 128}
+                    "rerender_lora": "regen.safetensors", "rerender_lora_strength": 0.8, "width": 128, "height": 64}
         try:
             job, _ = self.run_project({"shots": shots}, settings)
             base_a, base_b, tail_a, tail_b, again_a, again_b = self.fake.calls
@@ -375,7 +375,7 @@ class RenderTests(unittest.TestCase):
     def test_rtx_vsr_lifts_the_film_from_a_smaller_h3_canvas(self):
         shots = [{"id": "a", "frames": 30, "prompt": "一"}]
         settings = {"rerender": True, "rerender_scale": 2.0, "rerender_steps": 2, "rtx_vsr": True, "rtx_vsr_scale": 2.0,
-                    "width": 512, "height": 256}
+                    "width": 128, "height": 64}
         job, path = self.run_project({"shots": shots}, settings)
         base, again = self.fake.calls
         # 512x256 film: RTX lifts it from 256x128, where the rerender ends; the draft is 128x64.
@@ -393,7 +393,7 @@ class RenderTests(unittest.TestCase):
     def test_each_pass_lifts_by_its_own_scale_and_caches_on_its_own(self):
         shots = [{"id": "a", "frames": 30, "prompt": "一"}, {"id": "b", "frames": 30, "prompt": "二"}]
         settings = {"two_pass": True, "two_pass_scale": 2.0, "two_pass_steps": 2, "rerender": True, "rerender_scale": 2.0,
-                    "rerender_steps": 4, "rerender_denoise": 0.5, "width": 512, "height": 256}
+                    "rerender_steps": 4, "rerender_denoise": 0.5, "width": 128, "height": 64}
         job, path = self.run_project({"shots": shots}, settings)
         # Pass by pass: every shot's two-pass, then every shot's rerender.
         base_a, base_b, tail_a, tail_b, again_a, again_b = self.fake.calls
@@ -413,7 +413,7 @@ class RenderTests(unittest.TestCase):
 
     def test_base_cache_key_follows_the_sampler_settings_not_the_passes(self):
         shots = [{"id": "a", "frames": 30, "prompt": "一"}]
-        settings = {"rerender": True, "rerender_scale": 2.0, "width": 256, "height": 128}
+        settings = {"rerender": True, "rerender_scale": 2.0, "width": 128, "height": 64}
         self.run_project({"shots": shots}, settings)
         self.run_project({"shots": shots}, {**settings, "rerender_denoise": 0.6})
         self.assertEqual([c["start"] for c in self.fake.calls], [0.6])
@@ -428,7 +428,7 @@ class RenderTests(unittest.TestCase):
         shots = [{"id": "s", "kind": "source", "frames": 30, "prompt": "", "source": source},
                  {"id": "b", "frames": 30, "prompt": "接着", "continue": True}]
         job, _ = self.run_project({"shots": shots}, {"two_pass": True, "two_pass_scale": 2.0, "rerender": True, "rerender_scale": 2.0,
-                                                     "width": 512, "height": 256})
+                                                     "width": 128, "height": 64})
         base, tail, again = self.fake.calls
         self.assertEqual([c["shape"][-2:] for c in (base, tail, again)], [(4, 8), (8, 16), (16, 32)])
         for call in (base, tail, again):

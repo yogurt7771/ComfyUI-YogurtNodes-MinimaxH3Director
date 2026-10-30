@@ -75,10 +75,6 @@ def send_plan(node_id, phases):
         server.send_sync(EVENT, {"node": node_id, "stage": "plan", "phases": phases})
 
 
-def _round32(value):
-    return max(64, round(value / 32) * 32)
-
-
 def _decode(vae, video):
     images = vae.decode(video)
     return images.reshape(-1, *images.shape[-3:]).float().cpu()
@@ -102,19 +98,15 @@ class Render:
     def __init__(self, node_id, prompt, project, models, media, settings, report=()):
         self.node_id, self.project, self.m, self.media = node_id, project, models, media
         self.windows = plan_windows(project)
-        self.film_w, self.film_h = project["width"], project["height"]
-        # out is the size H3 ends on: the film divided by the 成片超分 scale that lifts it there (1 without it).
-        scale = project["superres"]["scale"] if project["superres"] else 1.0
-        self.out_w, self.out_h = _round32(self.film_w / scale), _round32(self.film_h / scale)
         refine = project["refine"]
         self.passes = [(kind, refine[kind]) for kind in ("two_pass", "rerender") if refine[kind]]
         self.refine = refine if self.passes else None
-        # canvas[p] is what pass p starts from and canvas[p + 1] what it samples on; canvas[0] is the draft.
-        self.canvas = [(self.out_w, self.out_h)]
-        for _, options in reversed(self.passes):
-            w, h = self.canvas[0]
-            self.canvas.insert(0, (_round32(w / options["scale"]), _round32(h / options["scale"])))
+        # canvas[p] is what pass p starts from and canvas[p + 1] what it samples on; canvas[0] is the draft and the
+        # last one, out, is where H3 ends before 成片超分 lifts it to the film.
+        self.canvas = project["canvas"]
         self.width, self.height = self.canvas[0]
+        self.out_w, self.out_h = self.canvas[-1]
+        self.film_w, self.film_h = project["film"]
         signature = lambda names: cache.upstream_signature(prompt, node_id, names)
         base = [VERSION, signature(["model", "ref_model", "clip", "vae", "audio_vae", "sampler", "sigmas"]), settings,
                 self.width, self.height, project["overlap"], project["negative_prompt"], project["ref_image_size"]]

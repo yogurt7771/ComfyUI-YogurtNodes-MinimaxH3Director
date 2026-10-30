@@ -124,6 +124,22 @@ export function readProject(node) {
         detail: { enabled: value("detail") } };
 }
 
+// Python's round (halves to even) on the 32 px grid, as project.py lifts the canvas.
+const round32 = v => { const q = v / 32, f = Math.floor(q); return Math.max(64, (q - f === 0.5 ? f + (f % 2) : Math.round(q)) * 32); };
+
+/** [[name, width, height]] from the draft (width × height) through each enabled pass to the film. */
+export function canvasChain(project) {
+    const chain = [["首采", project.width, project.height]];
+    for (const [name, scale] of [["两段式", project.refine.twoPass], ["低噪重绘", project.refine.rerender], ["RTX 超分", project.superres]]) {
+        const [, w, h] = chain[chain.length - 1];
+        if (scale) chain.push([name, round32(w * scale), round32(h * scale)]);
+    }
+    return chain;
+}
+
+/** [width, height] of the film. */
+export const filmSize = project => canvasChain(project).pop().slice(1);
+
 /** The project as stored in the node's project widget and in exported files. */
 export const projectData = project => Object.fromEntries(Object.entries(project).filter(([key]) => !WIDGET_KEYS.includes(key)));
 

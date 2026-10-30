@@ -2,7 +2,7 @@
 import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
 import {
-    FPS, SHARED, STAGES, changed, clamp, clone, effectiveRefs, features, follows, graphInputs, h, inputPreview, mediaLabel, mediaPreview, mediaUrl,
+    FPS, SHARED, STAGES, canvasChain, changed, clamp, clone, effectiveRefs, features, filmSize, follows, graphInputs, h, inputPreview, mediaLabel, mediaPreview, mediaUrl,
     queueAlone, readInputs, refCount, newLayer, newShot, pickFile, planWindows, previewRewrite, projectData, readProject, rewritable, rewriterConfig,
     secs, sourceFile, storePrompts, totalFrames, uid, upload, widget, writeProject,
 } from "./core.js";
@@ -189,7 +189,7 @@ class Editor {
     }
 
     fitScreen() {
-        const { width, height } = this.project;
+        const [width, height] = filmSize(this.project);
         const box = this.viewport.getBoundingClientRect();
         const scale = Math.min(box.width / width, box.height / height);
         Object.assign(this.screen.style, { width: `${Math.floor(width * scale)}px`, height: `${Math.floor(height * scale)}px` });
@@ -397,7 +397,8 @@ class Editor {
     }
 
     async captureFrame() {
-        const canvas = h("canvas", { width: this.project.width, height: this.project.height });
+        const [width, height] = filmSize(this.project);
+        const canvas = h("canvas", { width, height });
         const source = this.stage?.kind === "video" ? this.video : this.stage?.kind === "storyboard" && this.image.style.display !== "none" ? this.image : null;
         if (!source) throw new Error("当前没有可截取的画面。");
         canvas.getContext("2d").drawImage(source, 0, 0, canvas.width, canvas.height);
@@ -501,18 +502,9 @@ class Editor {
     // ------------------------------------------------------------------ timeline
 
     renderMeta() {
-        const p = this.project, total = totalFrames(p);
-        // Each pass divides the canvas it ends on by its scale, rounded like the backend's Python round (halves to even).
-        const round32 = v => { const q = v / 32, f = Math.floor(q); return Math.max(64, (q - f === 0.5 ? f + (f % 2) : Math.round(q)) * 32); };
-        let size = [p.width, p.height];
-        const chain = [];
-        for (const [name, scale] of [["RTX 超分", p.superres], ["低噪重绘", p.refine.rerender], ["两段式", p.refine.twoPass]]) {
-            if (!scale) continue;
-            chain.unshift(`${name} ${size.join("×")}`);
-            size = size.map(v => round32(v / scale));
-        }
-        const refine = chain.length ? ` · 画幅：首采 ${size.join("×")} → ${chain.join(" → ")}` : "";
-        this.meta.textContent = `${p.width}×${p.height}${refine} · ${p.shots.length} 镜 · ${secs(total)} · 24fps`;
+        const p = this.project, total = totalFrames(p), chain = canvasChain(p).map(([name, ...size]) => [name, size.join("×")]);
+        const steps = chain.length > 1 ? ` · 画幅：${chain.map(([name, size]) => `${name} ${size}`).join(" → ")}` : "";
+        this.meta.textContent = `${chain[chain.length - 1][1]}${steps} · ${p.shots.length} 镜 · ${secs(total)} · 24fps`;
     }
 
     renderFooterTools() {

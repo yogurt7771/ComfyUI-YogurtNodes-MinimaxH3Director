@@ -74,9 +74,9 @@ def encode_keyframes(images, vae, width, height):
 def references(media, window, project, source_frames, vae, audio_vae):
     """Presentation items and DiT ref blocks in ReferenceToVideo order: images, videos, standalone audio.
 
-    "match" sizes reference images to the output canvas, also for a two-pass draft: the same references
-    condition the full-size pass, where their detail matters."""
-    width, height = project["width"], project["height"]
+    "match" sizes reference images to the canvas H3 ends on, also for the draft: the same references
+    condition the full-size passes, where their detail matters."""
+    width, height = project["canvas"][-1]
     refs = window.shot["refs"]
     items, blocks = [], []
     for item in refs["images"]:

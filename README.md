@@ -157,24 +157,24 @@ git clone https://github.com/yogurt7771/ComfyUI-YogurtNodes-MinimaxH3Director
 
 <img src="docs/images/node.webp" alt="导演台节点参数" width="330" align="right">
 
-二采和成片超分在节点参数里设置。`width` × `height` 永远是成片尺寸，首采在按各遍倍数缩小的小画幅上进行。导演台顶栏会显示整条画幅链。
+二采和成片超分在节点参数里设置。`width` × `height` 是首采尺寸，两段式、低噪重绘、成片超分依次按各自倍数放大，最后一遍的尺寸就是成片。导演台顶栏会显示整条画幅链。较早版本里 `width` × `height` 是成片尺寸，旧工作流开了二采或超分时要改成首采尺寸。
 
 **两段式** `two_pass`：首采只跑调度表前面的步数，放大 `two_pass_scale` 倍后跑完最后 `two_pass_steps` 步，总步数不变。生成的声音沿首采自己的噪声轨迹继续，不重新加噪。
 
-**低噪重绘** `rerender`：放大 `rerender_scale` 倍，从 `rerender_denoise` 的噪声再采 `rerender_steps` 步，音轨锁定。`rerender_scale` 为 1 时就在成片尺寸上精修。
+**低噪重绘** `rerender`：放大 `rerender_scale` 倍，从 `rerender_denoise` 的噪声再采 `rerender_steps` 步，音轨锁定。`rerender_scale` 为 1 时就在前一遍的画幅上精修。
 
 两遍可以单开，也可以同开（先两段式、再低噪重绘），各有放大方式和缓存，只改低噪重绘时不重跑两段式。
 
 **精修 LoRA** `rerender_lora`：低噪重绘这一遍给模型挂一个 LoRA，放在 `models/loras/`。推荐 [Open-H3-Regenerate-2K](https://huggingface.co/Efficient-Large-Model/Open-H3-Regenerate-2K) 的 [r128 转换版](https://huggingface.co/father558/H3-Open-Regenerate-2K-ComfyUI-r128)，配 `rerender_denoise` 0.71、`rerender_steps` 2，就是官方的 0.7 两步噪声表；模型要是 shift 6（示例的 fl2va 分支）。它已合并 Turbo 和 Sharp，叠在挂了 Turbo 的模型上结果一样。比 0.35 的普通低噪重绘细节多、少一步，长相和颜色不变；不要用它默认的 0.91 起点，那会重画颜色和长相。带参考的镜头走 `ref_model`（shift 12）也能用，和 shift 6 的结果看不出差别。
 
-**成片超分** `rtx_vsr`：最后用 NVIDIA RTX Video Super Resolution 把成片放大 `rtx_vsr_scale` 倍到 `width` × `height`，H3 在缩小后的画幅上生成。124 帧 2K 不到 1 秒，忠实于原画面但补的细节有限，适合在 H3 二采之后再放大一档。需要 RTX 显卡和 `nvidia-vfx`；开启后源视频镜头也会经过超分。
+**成片超分** `rtx_vsr`：最后用 NVIDIA RTX Video Super Resolution 把 H3 最后一遍的画面放大 `rtx_vsr_scale` 倍成为成片。124 帧 2K 不到 1 秒，忠实于原画面但补的细节有限，适合在 H3 二采之后再放大一档。需要 RTX 显卡和 `nvidia-vfx`；开启后源视频镜头也会经过超分。
 
-| 例：成片 | 首采 | 两段式 | 低噪重绘 | 成片超分 |
+| 例：`width` × `height` 与二采 | 首采 | 两段式 | 低噪重绘 | 成片 |
 | --- | --- | --- | --- | --- |
-| 1344×768，只开两段式（×2） | 672×384 · 6 步 | 1344×768 · 末 2 步 | — | — |
-| 1344×768，两段式 ×2 + 低噪重绘 ×1 | 672×384 | 1344×768 | 1344×768 | — |
-| 1344×768，两段式 ×2 + 低噪重绘 ×1.5 | 448×256 | 896×512 | 1344×768 | — |
-| 2688×1536，低噪重绘 ×1 + Regenerate LoRA + 超分 ×2 | 1344×768 | — | 1344×768 · 2 步 | 2688×1536 |
+| 672×384，只开两段式（×2） | 672×384 · 6 步 | 1344×768 · 末 2 步 | — | 1344×768 |
+| 672×384，两段式 ×2 + 低噪重绘 ×1 | 672×384 | 1344×768 | 1344×768 | 1344×768 |
+| 448×256，两段式 ×2 + 低噪重绘 ×1.5 | 448×256 | 896×512 | 1344×768 | 1344×768 |
+| 1344×768，低噪重绘 ×1 + Regenerate LoRA + 超分 ×2 | 1344×768 | — | 1344×768 · 2 步 | 2688×1536 |
 
 首采定下构图和五官，二采只在上面补细节，不改结构。Turbo LoRA 按 768p 训练，首采小于 1344×768 时，全身、中远景里的小脸常常在首采就画坏了（672×384 的首采里脸只有二三十像素）；之后的低噪重绘不管挂不挂 Regenerate LoRA、shift 6 还是 12，都只是把坏掉的五官画清楚，两段式 ×1.5 加低噪重绘 ×1.5 也时好时坏。人物小的镜头让首采保持 1344×768，用成片超分放大，脸还不够干净就加“跟随人脸”的放大贴回层（强度 0.5 左右）；近景、中景的脸够大，可以缩小首采换速度。
 
@@ -252,7 +252,7 @@ python -m pip install deepagents --no-deps
 | fl2va → `model` | `minimax_h3_fl2v_turbo_8step_v1.1_768p_comfyui_bf16.safetensors` | 后接 ModelSamplingMiniMaxH3，shift 6 / 3 |
 | ref2va → `ref_model` | `minimax_h3_ref2v_turbo_8step_v1.1_768p_comfyui_bf16.safetensors` | 不加 shift 节点（默认 12 / 3） |
 
-导演台 `steps` 8、`euler`、`simple`、`cfg` 1；画幅 1344×768，这是 LoRA 的训练尺寸，分辨率更低时 768p LoRA 效果会变差；`detail_steps` 3。两个模型共用 `steps`，换 4 步时两个 LoRA 一起换成 4 步版（fl2v v1.3 / ref2v v1.0）。不用加速时，把两个 LoRA 和 shift 节点旁路，`steps` 改回 25，采样器 `res_multistep`。
+导演台 `steps` 8、`euler`、`simple`、`cfg` 1；首采 1344×768，这是 LoRA 的训练尺寸，分辨率更低时 768p LoRA 效果会变差；`detail_steps` 3。两个模型共用 `steps`，换 4 步时两个 LoRA 一起换成 4 步版（fl2v v1.3 / ref2v v1.0）。不用加速时，把两个 LoRA 和 shift 节点旁路，`steps` 改回 25，采样器 `res_multistep`。
 
 强度都表示这一遍从多大的噪声开始（1 = 纯噪声），步数保持设定值，噪声表按调度器在该噪声以下排布。H3 的 shift 是 12，按步数比例截取（BasicScheduler 的 denoise）会让 0.35 实际从 0.87 开始，几乎等于重新生成，所以这里不用那种算法。低噪重绘常用 0.25–0.4，放大贴回 0.3–0.5。两段式不用强度：8 步、shift 6 时末 2 步约从 0.67 开始，shift 12 时约从 0.8；起点越高越能补细节，也越可能改动长相，减少 `two_pass_steps` 可以降低起点。
 
@@ -290,16 +290,16 @@ python -m pip install deepagents --no-deps
 | `steps` / `cfg` | 25 / 1.0 | 首采与原位重绘步数；H3 通常保持 cfg 1 |
 | `sampler_name` / `scheduler` | res_multistep / simple | 接了 `sampler` / `sigmas` 时被替换 |
 | `filename_prefix` | yogurt_h3/director | 成片在 `output/` 下的路径前缀 |
-| `width` / `height` | 832 / 480 | 成片尺寸，32 的倍数 |
+| `width` / `height` | 832 / 480 | 首采尺寸，32 的倍数；开二采或成片超分时成片按倍数放大 |
 | `overlap` | 22 | 续接重叠帧，可选 0 / 5 / 22 / 39 / 56，0 关闭续接 |
-| `ref_image_size` | match | 参考图尺寸：match 等比缩到成片像素量；max 短边最大 2048 |
+| `ref_image_size` | match | 参考图尺寸：match 等比缩到 H3 最后一遍画幅的像素量；max 短边最大 2048 |
 | `negative_prompt` | 空 | cfg 大于 1 时生效 |
 | `two_pass` · `_scale` · `_steps` | 关 · 2.0 · 2 | 两段式二采 |
 | `two_pass_upscaler` · `_latent_model` | h3_latent · 默认权重 | 两段式的放大方式 |
 | `rerender` · `_scale` · `_steps` · `_denoise` | 关 · 1.0 · 2 · 0.35 | 低噪重绘 |
 | `rerender_upscaler` · `_latent_model` | h3_latent · 默认权重 | 低噪重绘的放大方式 |
 | `rerender_lora` · `_strength` | none · 1.0 | 低噪重绘这一遍挂的 LoRA（`models/loras/`） |
-| `rtx_vsr` · `_scale` · `_quality` | 关 · 2.0 · ULTRA | 成片超分（RTX VSR），H3 在成片尺寸 ÷ 倍数上生成 |
+| `rtx_vsr` · `_scale` · `_quality` | 关 · 2.0 · ULTRA | 成片超分（RTX VSR），把 H3 最后一遍的画面放大到成片 |
 | `detail` · `detail_steps` | 开 · 8 | 放大贴回的总开关和步数 |
 
 画幅、续接、二采这些是节点参数；镜头、参考、声音和剧本存在工程里，可以在导演台顶栏导入 / 导出 JSON。
