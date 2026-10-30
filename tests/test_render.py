@@ -554,6 +554,24 @@ class RenderTests(unittest.TestCase):
         # Without a text target the SAM 3 checkpoint is never loaded.
         shots[0]["repaints"][0]["source"] = "box"
         self.assertEqual(node.check_lazy_status(json.dumps({"shots": shots}), **inputs), ["model", "clip", "vae", "audio_vae", "rewriter"])
+        # 读取连线素材 needs no model at all.
+        self.assertEqual(node.check_lazy_status(json.dumps({"shots": shots, "inputs_preview": True}), **inputs), [])
+
+    def test_a_run_announces_its_phases_and_their_shots(self):
+        sent, saved = [], render.send_plan
+        render.send_plan = lambda node_id, phases: sent.append(phases)
+        shots = [{"id": "a", "frames": 30, "prompt": "一"}, {"id": "b", "frames": 30, "prompt": "二"}]
+        settings = {"rerender": True, "rerender_steps": 2, "width": 128, "height": 64, "rerender_scale": 2.0}
+        try:
+            self.run_project({"shots": shots}, settings)
+            self.assertEqual(sent[-1], [["encoding", ["a", "b"]], ["sampling", ["a", "b"]], ["rerender", ["a", "b"]], ["decoding", ["a", "b"]],
+                                        ["detailing", []], ["assembling", ["a", "b"]]])
+            # Only the edited shot is worked on again; the panel shows the other one as cached.
+            shots[1]["prompt"] = "改"
+            self.run_project({"shots": shots}, settings)
+            self.assertEqual(sent[-1][:4], [["encoding", ["b"]], ["sampling", ["b"]], ["rerender", ["b"]], ["decoding", ["b"]]])
+        finally:
+            render.send_plan = saved
 
     def test_foreign_targets_are_translated_once_by_the_rewrite_model(self):
         replies = []

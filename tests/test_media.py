@@ -63,11 +63,11 @@ class InputPreviewTests(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.root = Path(self.tmp.name)
         write_video(self.root / "clip.mp4", 48, 64, 32)
-        self.saved = folder_paths.get_temp_directory()
-        folder_paths.set_temp_directory(str(self.root / "temp"))
+        self.saved = folder_paths.get_output_directory()
+        folder_paths.set_output_directory(str(self.root / "output"))
 
     def tearDown(self):
-        folder_paths.set_temp_directory(self.saved)
+        folder_paths.set_output_directory(self.saved)
         self.tmp.cleanup()
 
     def test_connected_pictures_are_saved_once_per_socket(self):
@@ -79,11 +79,15 @@ class InputPreviewTests(unittest.TestCase):
         media = Media(images={"image_0": torch.rand(2, 600, 800, 3)}, masks={"mask_0": torch.ones(3, 40, 60)},
                       videos={"video_0": InputImpl.VideoFromFile(str(self.root / "clip.mp4"))},
                       audios={"audio_0": {"waveform": torch.zeros(1, 2, 2400), "sample_rate": 24000}})
-        out = director.director._input_previews(spec, media, "7")
+        keys = [m["input"] for m in director.director._media(spec) if "input" in m]
+        out = director.director._input_previews(keys, media, "7")
         # image_1 is not connected and audio has no picture.
         self.assertEqual(sorted(out), ["image_0", "mask_0", "video_0"])
-        self.assertEqual(out["mask_0"], {"filename": "7_mask_0.png", "subfolder": "yogurt_h3/inputs", "type": "temp"})
-        folder = self.root / "temp" / "yogurt_h3" / "inputs"
+        # In output, which survives a ComfyUI restart (temp does not); the hash changes the name when the picture does.
+        self.assertRegex(out["mask_0"]["filename"], r"^7_mask_0_[0-9a-f]{10}\.png$")
+        self.assertEqual({k: v for k, v in out["mask_0"].items() if k != "filename"}, {"subfolder": "yogurt_h3_director/inputs", "type": "output"})
+        self.assertEqual(director.director._input_previews(["mask_0"], media, "7"), {"mask_0": out["mask_0"]})
+        folder = self.root / "output" / "yogurt_h3_director" / "inputs"
         sizes = {}
         for key in out:
             with Image.open(folder / out[key]["filename"]) as picture:

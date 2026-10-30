@@ -290,6 +290,8 @@ def load_project(text, settings=None):
     # The editor's 预览 runs one layer's mask instead of the film.
     preview = data.get("mask_preview")
     project["preview"] = {"layer": str(preview["layer"])} if isinstance(preview, dict) and preview.get("layer") else None
+    # 读取连线素材 returns pictures of the connected sockets, nothing else.
+    project["inputs_preview"] = bool(data.get("inputs_preview"))
     if not project["shots"]:
         raise ValueError("导演台里还没有镜头：在时间线上添加至少一个镜头。")
     if any(s["audio"] == "soundtrack" for s in project["shots"]) and project["soundtrack"] is None:

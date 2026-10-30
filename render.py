@@ -68,6 +68,13 @@ def send_event(node_id, shot_id, stage, prompt=None):
         server.send_sync(EVENT, {"node": node_id, "shot": shot_id, "stage": stage, "prompt": prompt})
 
 
+def send_plan(node_id, phases):
+    """The work of a run, phase by phase ([name, [shot ids]]), so the panel can show progress against it."""
+    server = getattr(PromptServer, "instance", None)
+    if server is not None:
+        server.send_sync(EVENT, {"node": node_id, "stage": "plan", "phases": phases})
+
+
 def _round32(value):
     return max(64, round(value / 32) * 32)
 
@@ -340,15 +347,30 @@ class Render:
 
     # ------------------------------------------------------------------ stages
 
+    def encodes(self, i):
+        """Whether shot ``i`` samples in this run, so its conditioning has to be encoded."""
+        flags, shot = self.need[i], self.windows[i].shot
+        layers = flags["repaint"] and max(flags["resume"], 0) < len(shot["repaints"])
+        refines = flags["refine"] and shot["refine"] and not self.passthrough(shot)
+        generates = flags["base"] and not self.edits_source(shot)
+        return bool(generates or layers or refines)
+
+    def announce(self):
+        ids = lambda wanted: [w.shot["id"] for w in self.windows if wanted(w.index)]
+        # A shot whose latent is only read back from the cache (for the tail the next shot carries) takes no sampling time.
+        phases = [["encoding", ids(self.encodes)], ["sampling", ids(lambda i: self.need[i]["base"] or self.need[i]["repaint"])]]
+        phases += [[kind, ids(lambda i, p=p: self.need[i]["passes"][p])] for p, (kind, _) in enumerate(self.passes)]
+        phases += [["decoding", ids(lambda i: self.need[i]["frames"])], ["detailing", ids(lambda i: any(self.need[i]["details"]))],
+                   ["assembling", ids(lambda i: True)]]
+        send_plan(self.node_id, phases)
+
     def encode(self):
         """Text encoder and VAE work for every shot that samples in this run."""
         for i, window in enumerate(self.windows):
+            if not self.encodes(i):
+                continue
             flags, shot = self.need[i], window.shot
             layers = range(max(flags["resume"], 0), len(shot["repaints"])) if flags["repaint"] else ()
-            refines = flags["refine"] and shot["refine"] and not self.passthrough(shot)
-            generates = flags["base"] and not self.edits_source(shot)
-            if not (generates or layers or refines):
-                continue
             comfy.model_management.throw_exception_if_processing_interrupted()
             self.event(i, "encoding")
             prompts = [shot["prompt"]] + [shot["repaints"][j]["prompt"] or shot["prompt"] for j in layers]
@@ -738,6 +760,7 @@ class Render:
 
     def run(self, filename_prefix):
         self.plan()
+        self.announce()
         self.encode()
         self.detect_sources()
         self.sample_shots()

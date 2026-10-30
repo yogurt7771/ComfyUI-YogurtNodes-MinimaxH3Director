@@ -2,9 +2,9 @@
 import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
 import {
-    FPS, SHARED, STAGES, changed, clamp, clone, effectiveRefs, features, follows, graphInputs, h, inputPreview, isAudio, isVideo, mediaLabel, mediaUrl,
-    refCount, newLayer, newShot, pickFile, planWindows, previewRewrite, projectData, readProject, rewritable, rewriterConfig, secs, sourceFile,
-    storePrompts, totalFrames, uid, upload, widget, writeProject,
+    FPS, SHARED, STAGES, changed, clamp, clone, effectiveRefs, features, follows, graphInputs, h, inputPreview, mediaLabel, mediaPreview, mediaUrl,
+    queueAlone, readInputs, refCount, newLayer, newShot, pickFile, planWindows, previewRewrite, projectData, readProject, rewritable, rewriterConfig,
+    secs, sourceFile, storePrompts, totalFrames, uid, upload, widget, writeProject,
 } from "./core.js";
 import { Painter } from "./painter.js";
 
@@ -26,19 +26,19 @@ async function detectors() {
     return detectorList;
 }
 
-export function openEditor(node, panel, index) {
-    const editor = new Editor(node, panel, index);
+export function openEditor(node, panel, index, tab) {
+    const editor = new Editor(node, panel, index, tab);
     editor.open();
     return editor;
 }
 
 class Editor {
-    constructor(node, panel, index) {
+    constructor(node, panel, index, tab = "shot") {
         this.node = node;
         this.panel = panel;
         this.project = readProject(node);
         this.selected = clamp(index ?? 0, 0, this.project.shots.length - 1);
-        this.tab = "shot";
+        this.tab = tab;
         this.frame = 0;
         this.view = null;
         this.trim = null;
@@ -765,11 +765,8 @@ class Editor {
         return h("button", { onclick: () => { item.seed = (item.seed || 0) + 1; this.commit(); this.renderInspector(); }, title: "换一个随机结果" }, `🎲 换种子（${item.seed || 0}）`);
     }
 
-    /** What a media item looks like here: an upload's own file, or what is known about a connected socket. */
     preview(media) {
-        if (!media) return null;
-        if (media.input) return inputPreview(this.node, media.input);
-        return { url: mediaUrl(media), video: isVideo(media), audio: isAudio(media), name: media.filename };
+        return mediaPreview(this.node, media);
     }
 
     /**
@@ -779,7 +776,7 @@ class Editor {
     slot(media, { accept = "image/*", tag, graph = ["image"], capture = false, onpick }) {
         const shown = this.preview(media);
         const el = h(`div.slot${media ? ".filled" : ""}`, {
-            title: !media ? "点击上传，或把文件拖到这里" : media.input && !shown ? `${media.input}：上游不是加载节点，运行一次后显示画面` : mediaLabel(media) });
+            title: !media ? "点击上传，或把文件拖到这里" : media.input && !shown ? `${media.input}：还没有画面，点“读取预览”` : mediaLabel(media) });
         if (shown?.video) el.append(h("video", { src: shown.url, muted: true, preload: "metadata" }));
         else if (shown?.audio) el.append(h("span", {}, `♪ ${shown.name}`));
         else if (shown?.url) el.style.backgroundImage = `url("${shown.url}")`;
@@ -801,9 +798,17 @@ class Editor {
             // The slot's own file stays on the item while a socket is picked, so switching back restores it.
             const own = media?.input ? media.file : media;
             extras.push(h("select", {
-                onchange: e => { if (e.target.value) onpick({ input: e.target.value, ...(own && { file: own }) }); else if (own) onpick(own); },
+                onchange: e => {
+                    const input = e.target.value;
+                    if (input) onpick({ input, ...(own && { file: own }) }); else if (own) onpick(own);
+                    // A socket whose upstream the editor cannot show itself gets its picture from a run of the upstream alone.
+                    if (input && !input.startsWith("audio_") && !inputPreview(this.node, input)) readInputs(this.node, this.panel);
+                },
             }, h("option", { value: "" }, own ? `上传：${own.filename}` : "连线素材…"),
                 ...inputs.map(i => h("option", { value: i.input, selected: media?.input === i.input }, i.label))));
+        }
+        if (media?.input && !shown && !media.input.startsWith("audio_")) {
+            extras.push(h("button", { onclick: () => readInputs(this.node, this.panel), title: "只运行导演台的上游，取得连线素材的画面，不加载 H3" }, "读取预览"));
         }
         if (capture) extras.push(h("button", { onclick: async () => { try { onpick(await this.captureFrame()); } catch (error) { alert(error.message); } } }, "截取当前画面"));
         return h("div.field", {}, el, extras.length ? h("div.row", {}, ...extras) : null);
@@ -1082,18 +1087,7 @@ class Editor {
     /** Queue the director alone with a mask preview request: it runs SAM 3 / face detection, never H3. */
     async previewMask(layer) {
         try {
-            const { output, workflow } = await app.graphToPrompt();
-            const id = String(this.node.id), inputs = output[id]?.inputs;
-            if (!inputs) throw new Error("找不到导演台节点。");
-            inputs.project = JSON.stringify({ ...JSON.parse(inputs.project), mask_preview: { layer: layer.id } });
-            const response = await api.fetchApi("/prompt", {
-                method: "POST", headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ client_id: api.clientId, prompt: output, extra_data: { extra_pnginfo: { workflow } }, partial_execution_targets: [id] }),
-            });
-            if (!response.ok) {
-                const body = await response.json().catch(() => ({}));
-                throw new Error(body.error?.message || `HTTP ${response.status}`);
-            }
+            await queueAlone(this.node, { mask_preview: { layer: layer.id } });
             this.panel.say("已加入队列：识别重绘层的遮罩，完成后在“局部重绘”页显示。");
         } catch (error) {
             alert(`识别预览没能开始：${error.message}`);

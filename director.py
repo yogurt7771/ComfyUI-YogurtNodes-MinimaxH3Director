@@ -1,5 +1,7 @@
 """Yogurt H3 导演台: one node from the visual timeline to a finished MiniMax H3 video."""
 
+import hashlib
+from io import BytesIO
 import json
 import os
 
@@ -65,14 +67,16 @@ def _translate(project, rewriter, report):
     return english
 
 
-def _input_previews(project, media, node_id):
-    """Small pictures of the connected image / video / mask sockets the project uses, saved to temp for the editor."""
-    folder = os.path.join(folder_paths.get_temp_directory(), "yogurt_h3", "inputs")
+def _input_previews(keys, media, node_id):
+    """Small pictures of connected image / video / mask sockets for the editor and panel. They go to output, not temp:
+    ComfyUI empties temp at every start, which would leave the node pointing at missing files. The name carries a content
+    hash, so a changed input gets a new URL instead of the browser's cached picture."""
+    folder = os.path.join(folder_paths.get_output_directory(), "yogurt_h3_director", "inputs")
     out = {}
-    for item in _media(project):
-        key = item.get("input")
-        if key is None or key in out or key.startswith("audio_") or key not in media.inputs:
+    for key in keys:
+        if key in out or key.startswith("audio_") or key not in media.inputs:
             continue
+        item = {"input": key}
         if key.startswith("video_"):
             width, height = media.video_size(item)
             scale = min(1.0, 320 / max(width, height))
@@ -83,10 +87,13 @@ def _input_previews(project, media, node_id):
             frame = media.image(item)
         picture = Image.fromarray((frame[0, ..., :3].clamp(0, 1) * 255).byte().cpu().numpy())
         picture.thumbnail((320, 320))
+        buffer = BytesIO()
+        picture.save(buffer, format="PNG")
         os.makedirs(folder, exist_ok=True)
-        name = f"{node_id}_{key}.png"
-        picture.save(os.path.join(folder, name))
-        out[key] = {"filename": name, "subfolder": "yogurt_h3/inputs", "type": "temp"}
+        name = f"{node_id}_{key}_{hashlib.sha1(buffer.getvalue()).hexdigest()[:10]}.png"
+        with open(os.path.join(folder, name), "wb") as f:
+            f.write(buffer.getvalue())
+        out[key] = {"filename": name, "subfolder": "yogurt_h3_director/inputs", "type": "output"}
     return out
 
 
@@ -187,6 +194,8 @@ class YogurtH3Director(io.ComfyNode):
     @classmethod
     def check_lazy_status(cls, project, **inputs):
         spec = load_project(project, inputs)
+        if spec["inputs_preview"]:
+            return []
         names = PREVIEW_INPUTS if spec["preview"] else LAZY_INPUTS
         if not any(layer["target"] for shot in spec["shots"] for layer in shot["repaints"] + shot["details"]):
             names = [name for name in names if name not in ("sam3", "sam3_clip")]
@@ -209,6 +218,9 @@ class YogurtH3Director(io.ComfyNode):
                 sigmas=None, sam3=None, sam3_clip=None, images=None, masks=None, videos=None, audios=None, **settings) -> io.NodeOutput:
         spec = load_project(project, settings)
         media = Media(images, masks, videos, audios)
+        if spec["inputs_preview"]:
+            # 读取连线素材: only the sockets' upstream ran; return their pictures without touching any model.
+            return io.NodeOutput(None, ui={"yogurt_h3_inputs": [_input_previews(sorted(media.inputs), media, cls.hidden.unique_id)]})
         prompts, report = {}, []
         targets = _translate(spec, rewriter, report)
         if spec["rewrite"]["enabled"] and not spec["preview"]:
@@ -228,5 +240,6 @@ class YogurtH3Director(io.ComfyNode):
         timeline = [{"id": w.shot["id"], "start": w.start, "frames": w.keep, "head": w.head, "gen": w.gen} for w in render.windows]
         return io.NodeOutput(video, ui={"images": [saved], "animated": (True,),
                                         "yogurt_h3": [{"timeline": timeline, "report": render.report, "video": saved, "prompts": prompts,
-                                                       "inputs": _input_previews(spec, media, cls.hidden.unique_id), "targets": targets,
+                                                       "inputs": _input_previews([m["input"] for m in _media(spec) if "input" in m], media,
+                                                                                 cls.hidden.unique_id), "targets": targets,
                                                        "size": [render.film_w, render.film_h]}]})

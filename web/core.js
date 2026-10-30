@@ -9,6 +9,12 @@ export const STAGES = {
     segmenting: "识别遮罩", decoding: "解码中", detailing: "放大贴回中", superres: "超分中", rewriting: "改写提示词", rewritten: "已改写",
     complete: "完成",
 };
+// Phases of a run in the order the backend works through them (Render.announce), with a rough share of the time one shot
+// spends in each, for the overall progress bar.
+export const PHASES = {
+    encoding: ["编码", 1], sampling: ["生成", 6], two_pass: ["两段式", 3], rerender: ["低噪重绘", 3],
+    decoding: ["解码", 2], detailing: ["放大贴回", 3], assembling: ["成片", 1],
+};
 
 export const align = n => { n = Math.max(5, Math.round(n)); while (n % 17 !== 5) n++; return n; };
 export const uid = () => Math.random().toString(36).slice(2, 9);
@@ -198,12 +204,16 @@ function annotated(value) {
  * What the editor can show for a connected socket: the file of a loader wired straight into it, or the thumbnail the
  * last run saved (for anything processed upstream). {url, video} / {audio, name}, or null when nothing is known yet.
  */
-/** The node feeding one of the director's media sockets, e.g. "video_0". */
+/** The node feeding one of the director's media sockets, e.g. "video_0"; legacy Reroute nodes are passed through. */
 function inputOrigin(node, input) {
     const slot = node.inputs?.find(i => i.link != null && (i.name === input || i.name.endsWith(`.${input}`)));
-    const links = app.graph.links;
-    const link = slot && (links.get ? links.get(slot.link) : links[slot.link]);
-    return link ? app.graph.getNodeById(link.origin_id) : null;
+    const links = app.graph.links, get = id => (links.get ? links.get(id) : links[id]);
+    let link = slot && get(slot.link), origin = link ? app.graph.getNodeById(link.origin_id) : null;
+    while (origin?.type === "Reroute" && origin.inputs?.[0]?.link != null) {
+        link = get(origin.inputs[0].link);
+        origin = link ? app.graph.getNodeById(link.origin_id) : null;
+    }
+    return origin;
 }
 
 /** The file behind a source video: an upload, or what a connected LoadVideo loads; null for any other socket. */
@@ -221,8 +231,45 @@ export function inputPreview(node, input) {
     if (origin?.type === "LoadAudio" && value("audio")) return { audio: true, name: annotated(value("audio")).filename };
     // A mask socket fed by LoadImage carries its alpha channel, not the picture, so masks wait for the run thumbnail.
     if (origin?.type === "LoadImage" && value("image") && input.startsWith("image_")) return { url: mediaUrl(annotated(value("image"))) };
+    // Thumbnails used to live in temp, which ComfyUI empties at every start: those records point at nothing now.
     const saved = node.properties?.yh3Inputs?.[input];
-    return saved ? { url: mediaUrl(saved) } : null;
+    if (saved && saved.type !== "temp") return { url: mediaUrl(saved) };
+    // Any other image node that already shows its picture on the canvas (other loaders, previews of an earlier run).
+    const shown = input.startsWith("image_") && origin?.imgs?.[0]?.src;
+    return shown ? { url: shown } : null;
+}
+
+/** What a media item looks like: an upload's own file, or what is known about a connected socket. */
+export function mediaPreview(node, media) {
+    if (!media) return null;
+    if (media.input) return inputPreview(node, media.input);
+    return { url: mediaUrl(media), video: isVideo(media), audio: isAudio(media), name: media.filename };
+}
+
+/** Queue the director alone (with its upstream) with ``extra`` merged into the project: a preview that loads no H3 model. */
+export async function queueAlone(node, extra) {
+    const { output, workflow } = await app.graphToPrompt();
+    const id = String(node.id), inputs = output[id]?.inputs;
+    if (!inputs) throw new Error("找不到导演台节点。");
+    inputs.project = JSON.stringify({ ...JSON.parse(inputs.project), ...extra });
+    const response = await api.fetchApi("/prompt", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ client_id: api.clientId, prompt: output, extra_data: { extra_pnginfo: { workflow } }, partial_execution_targets: [id] }),
+    });
+    if (!response.ok) {
+        const body = await response.json().catch(() => ({}));
+        throw new Error(body.error?.message || `HTTP ${response.status}`);
+    }
+}
+
+/** 读取连线素材: pictures of every connected image / video / mask socket, without running H3. */
+export async function readInputs(node, panel) {
+    try {
+        await queueAlone(node, { inputs_preview: true });
+        panel?.say("正在读取连线素材…");
+    } catch (error) {
+        alert(`读取连线素材没能开始：${error.message}`);
+    }
 }
 
 export function mediaUrl(m) {
@@ -333,6 +380,29 @@ const css = `
 .yh3-panel .result { flex:1.3; min-height:54px; overflow:auto; white-space:pre-wrap; font:11px/1.5 Consolas,monospace; color:var(--yh3-dim);
   background:#12151a; border:1px solid var(--yh3-line); border-radius:6px; padding:5px 7px; }
 .yh3-panel .result b { color:var(--yh3-ink); font-family:"Segoe UI",sans-serif; }
+.yh3-panel label.field { flex:1; display:flex; flex-direction:column; gap:2px; }
+.yh3-panel label.field.storyf { flex:.6; }
+.yh3-panel label.field > span { color:var(--yh3-dim); font-size:11px; }
+.yh3-panel label.field.storyf textarea { min-height:40px; }
+.yh3-panel .runbox { flex:none; display:flex; gap:8px; padding:6px; border-radius:6px; background:var(--yh3-panel); border:1px solid var(--yh3-line); }
+.yh3-panel .runbox[hidden], .yh3-panel .runbox img[hidden], .yh3-panel .refs[hidden] { display:none; }
+.yh3-panel .runbox img { height:62px; aspect-ratio:16/9; object-fit:cover; border-radius:4px; background:#000; flex:none; }
+.yh3-panel .runbox .info { flex:1; min-width:0; display:flex; flex-direction:column; justify-content:center; gap:4px; }
+.yh3-panel .runbox .line { display:flex; gap:8px; align-items:baseline; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.yh3 .bar { position:relative; height:6px; border-radius:3px; background:#0f1216; overflow:hidden; }
+.yh3 .bar i { position:absolute; left:0; top:0; bottom:0; background:linear-gradient(90deg,var(--yh3-gen),var(--yh3-accent)); transition:width .3s; }
+.yh3 .runbox.done .bar i { background:var(--yh3-ok); }
+.yh3 .runbox.error .bar i { background:var(--yh3-warn); }
+.yh3 .runbox.error .line b { color:var(--yh3-warn); }
+.yh3 .block .fill { position:absolute; left:0; bottom:0; height:3px; background:#ffd257; pointer-events:none; transition:width .3s; }
+.yh3 .block[data-state=waiting] { opacity:.75; }
+.yh3 .block[data-state=cached] { opacity:.55; }
+.yh3-panel .refs { flex:none; display:flex; gap:5px; align-items:center; overflow-x:auto; scrollbar-width:thin; }
+.yh3-panel .thumb { position:relative; flex:none; height:52px; min-width:52px; border-radius:5px; border:1px solid var(--yh3-line); background:#12151a center/cover no-repeat;
+  overflow:hidden; cursor:pointer; display:flex; align-items:center; justify-content:center; padding:2px 6px; font-size:10px; color:var(--yh3-dim); text-align:center; }
+.yh3-panel .thumb.picture { aspect-ratio:1; padding:2px; }
+.yh3-panel .thumb video { position:absolute; inset:0; width:100%; height:100%; object-fit:cover; }
+.yh3-panel .thumb .tag { position:absolute; left:2px; top:2px; z-index:1; background:#000b; border-radius:3px; padding:0 3px; font-size:9px; color:#fff; }
 .yh3-modal { position:fixed; inset:0; z-index:10000; background:#000a; display:flex; }
 .yh3-modal .frame { margin:auto; width:min(1680px,97vw); height:min(1000px,95vh); background:var(--yh3-bg); border:1px solid var(--yh3-line); border-radius:12px;
   display:grid; grid-template-rows:auto 1fr auto; overflow:hidden; box-shadow:0 20px 70px #000c; }
