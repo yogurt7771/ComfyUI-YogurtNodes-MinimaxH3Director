@@ -165,7 +165,7 @@ git clone https://github.com/yogurt7771/ComfyUI-YogurtNodes-MinimaxH3Director
 
 两遍可以单开，也可以同开（先两段式、再低噪重绘），各有放大方式和缓存，只改低噪重绘时不重跑两段式。
 
-**精修 LoRA** `rerender_lora`：低噪重绘这一遍给模型挂一个 LoRA，放在 `models/loras/`。推荐 [Open-H3-Regenerate-2K](https://huggingface.co/Efficient-Large-Model/Open-H3-Regenerate-2K) 的 [r128 转换版](https://huggingface.co/father558/H3-Open-Regenerate-2K-ComfyUI-r128)，配 `rerender_denoise` 0.71、`rerender_steps` 2，就是官方的 0.7 两步噪声表；模型要是 shift 6（示例的 fl2va 分支）。它已合并 Turbo 和 Sharp，叠在挂了 Turbo 的模型上结果一样。比 0.35 的普通低噪重绘细节多、少一步，长相和颜色不变；不要用它默认的 0.91 起点，那会重画颜色和长相。带参考的镜头走 `ref_model`（shift 12），这个组合还没验证。
+**精修 LoRA** `rerender_lora`：低噪重绘这一遍给模型挂一个 LoRA，放在 `models/loras/`。推荐 [Open-H3-Regenerate-2K](https://huggingface.co/Efficient-Large-Model/Open-H3-Regenerate-2K) 的 [r128 转换版](https://huggingface.co/father558/H3-Open-Regenerate-2K-ComfyUI-r128)，配 `rerender_denoise` 0.71、`rerender_steps` 2，就是官方的 0.7 两步噪声表；模型要是 shift 6（示例的 fl2va 分支）。它已合并 Turbo 和 Sharp，叠在挂了 Turbo 的模型上结果一样。比 0.35 的普通低噪重绘细节多、少一步，长相和颜色不变；不要用它默认的 0.91 起点，那会重画颜色和长相。带参考的镜头走 `ref_model`（shift 12）也能用，和 shift 6 的结果看不出差别。
 
 **成片超分** `rtx_vsr`：最后用 NVIDIA RTX Video Super Resolution 把成片放大 `rtx_vsr_scale` 倍到 `width` × `height`，H3 在缩小后的画幅上生成。124 帧 2K 不到 1 秒，忠实于原画面但补的细节有限，适合在 H3 二采之后再放大一档。需要 RTX 显卡和 `nvidia-vfx`；开启后源视频镜头也会经过超分。
 
@@ -174,7 +174,9 @@ git clone https://github.com/yogurt7771/ComfyUI-YogurtNodes-MinimaxH3Director
 | 1344×768，只开两段式（×2） | 672×384 · 6 步 | 1344×768 · 末 2 步 | — | — |
 | 1344×768，两段式 ×2 + 低噪重绘 ×1 | 672×384 | 1344×768 | 1344×768 | — |
 | 1344×768，两段式 ×2 + 低噪重绘 ×1.5 | 448×256 | 896×512 | 1344×768 | — |
-| 2688×1536，低噪重绘 ×2 + Regenerate LoRA + 超分 ×2 | 672×384 | — | 1344×768 · 2 步 | 2688×1536 |
+| 2688×1536，低噪重绘 ×1 + Regenerate LoRA + 超分 ×2 | 1344×768 | — | 1344×768 · 2 步 | 2688×1536 |
+
+首采定下构图和五官，二采只在上面补细节，不改结构。Turbo LoRA 按 768p 训练，首采小于 1344×768 时，全身、中远景里的小脸常常在首采就画坏了（672×384 的首采里脸只有二三十像素）；之后的低噪重绘不管挂不挂 Regenerate LoRA、shift 6 还是 12，都只是把坏掉的五官画清楚，两段式 ×1.5 加低噪重绘 ×1.5 也时好时坏。人物小的镜头让首采保持 1344×768，用成片超分放大，脸还不够干净就加“跟随人脸”的放大贴回层（强度 0.5 左右）；近景、中景的脸够大，可以缩小首采换速度。
 
 放大方式：`h3_latent`（默认）用 [H3 latent 放大模型](https://huggingface.co/LBH-123-AI/Minimax_h3_latent_Upscaler)直接放大视频 latent，不经过 VAE；`lanczos` / `model` 走 VAE 解码 → 放大 → 编码。单镜可以在“镜头”页取消“参与二采”。
 
