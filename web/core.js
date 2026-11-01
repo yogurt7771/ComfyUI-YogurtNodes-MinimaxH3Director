@@ -424,6 +424,7 @@ const css = `
   display:grid; grid-template-rows:auto 1fr auto; overflow:hidden; box-shadow:0 20px 70px #000c; }
 .yh3-modal header { display:flex; align-items:center; gap:10px; padding:10px 14px; border-bottom:1px solid var(--yh3-line); background:var(--yh3-panel); }
 .yh3-modal header strong { font:600 17px "Bahnschrift","Segoe UI",sans-serif; letter-spacing:.04em; }
+.yh3-modal header .status { flex:1; min-width:0; color:var(--yh3-accent); display:-webkit-box; -webkit-box-orient:vertical; -webkit-line-clamp:2; overflow:hidden; }
 .yh3-modal main { display:grid; grid-template-columns:minmax(0,1fr) 400px; min-height:0; }
 .yh3-modal .stage { display:flex; flex-direction:column; min-width:0; min-height:0; padding:12px; gap:8px; }
 .yh3-modal .viewport { position:relative; flex:1; min-height:0; display:flex; align-items:center; justify-content:center; background:#0b0d10; border-radius:8px; overflow:hidden; }

@@ -47,6 +47,7 @@ class Editor {
         this.boxing = -1;
         // 自动分段 settings, in frames; segments 0 lets the planner choose the count.
         this.splitting = { shortest: 5 * FPS, longest: 10 * FPS, segments: 0, cover: true };
+        this.analysing = false;
     }
 
     get shot() { return this.project.shots[this.selected]; }
@@ -74,12 +75,13 @@ class Editor {
         this.pane = h("div.pane");
         this.tabs = h("div.tabs");
         this.meta = h("span.dim");
+        this.status = h("span.status");
         this.ruler = h("div.ruler");
         this.track = h("div.track");
         this.footerTools = h("div.row");
         const frame = h("div.frame", {},
             h("header", {},
-                h("strong", {}, "H3 导演台"), this.meta, h("span.grow"),
+                h("strong", {}, "H3 导演台"), this.meta, this.status,
                 h("button", { onclick: () => this.importProject(), title: "从 JSON 文件导入镜头、参考和剧本（画幅、二采等在节点参数里）" }, "导入工程"),
                 h("button", { onclick: () => this.exportProject() }, "导出工程"),
                 h("button.primary", { onclick: () => this.run() }, "▶ 运行全片"),
@@ -154,6 +156,12 @@ class Editor {
         writeProject(this.node, this.project);
         app.queuePrompt(0, 1);
         this.panel.say("已加入队列。");
+    }
+
+    /** The panel's status line sits on the node, under this modal: its messages show here too. */
+    say(text) {
+        this.status.textContent = text;
+        this.status.title = text;
     }
 
     // ------------------------------------------------------------------ stage
@@ -565,6 +573,8 @@ class Editor {
         if (!file) return this.panel.say("自动分段需要上传的视频文件或 LoadVideo 里的视频。");
         if (longest < shortest) return this.panel.say("自动分段：最长时长不能短于最短时长。");
         this.panel.say("自动分段：正在分析源视频的剪辑点和动作……");
+        this.analysing = true;
+        this.renderInspector();
         let result;
         try {
             const response = await api.fetchApi("/yogurt_h3/director/split", { method: "POST", body: JSON.stringify({
@@ -573,6 +583,9 @@ class Editor {
             if (!response.ok) throw new Error(result.error || response.statusText);
         } catch (error) {
             return this.panel.say(`自动分段失败：${error.message}`);
+        } finally {
+            this.analysing = false;
+            this.renderInspector();
         }
         const last = frame => (frame === -1 ? shot.frames - 1 : frame), cover = result.cover;
         const parts = result.segments.map((segment, k) => {
@@ -591,9 +604,12 @@ class Editor {
             const copy = shot.source.start + cover.copy, k = result.segments.findIndex(s => s.start <= copy && copy < s.start + s.frames);
             still.still = { shot: parts[k].id, frame: copy - result.segments[k].start };
         }
-        this.project.shots.splice(this.selected, 1, ...(still ? [still] : []), ...parts);
-        this.frame = 0;
-        this.commit(true);
+        // The analysis takes seconds: another shot may be selected by now, or this one deleted.
+        const at = this.project.shots.indexOf(shot);
+        if (at < 0) return this.panel.say("自动分段：这一镜在分析时被删除了。");
+        this.project.shots.splice(at, 1, ...(still ? [still] : []), ...parts);
+        this.commit();
+        this.select(at);
         const first = this.selected + (still ? 1 : 0);
         const joins = parts.slice(1).map(p => (p.continue ? "续接" : "剪辑点硬切"));
         const cuts = result.segments.map((s, k) => (s.cuts.length ? `第 ${first + k + 1} 镜剪辑点 ${s.cuts.map(secs).join("、")}` : "")).filter(Boolean);
@@ -878,7 +894,8 @@ class Editor {
             parts.push(this.field("自动分段（每段一个镜头：剪辑点处硬切，不到 1 秒的快切镜头合成一段；比最长时长还长的镜头在镜头内续接切开，切出的每段不短于最短时长）",
                 h("div.row", {}, "最短", seconds("shortest"), "秒 · 最长", seconds("longest"), "秒 · 段数",
                     this.number(this.splitting, "segments", { min: 0, max: 99 }), h("span.dim", {}, "0 = 自动"),
-                    h("button", { onclick: () => this.autoSplit() }, "自动分段")),
+                    h("button", { disabled: this.analysing, onclick: () => this.autoSplit() }, this.analysing ? "分析中…" : "自动分段")),
+                this.analysing ? h("div.note", {}, "正在分段：分析源视频的剪辑点和动作，视频越长越久。完成前请勿修改这一镜。") : null,
                 this.check(this.splitting, "cover", "识别开头的封面帧（单独成一镜不参与生成，成片里换成它重复的那一帧的生成结果）")));
         }
         const source = shot.kind === "source";

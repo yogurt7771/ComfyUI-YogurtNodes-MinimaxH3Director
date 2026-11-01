@@ -73,6 +73,7 @@ class Panel {
     say(text) {
         this.status.textContent = text;
         this.status.title = text;
+        if (this.editor?.root?.isConnected) this.editor.say(text);
     }
 
     open(index = this.selected, tab) {
