@@ -317,6 +317,12 @@ class Editor {
         }
         const clip = stage.trim, length = stage.length, total = this.trimTotal = Math.max(1, Math.floor(duration * FPS));
         const source = clip === this.shot.source;
+        if (source && this.wholeVideo === clip) {
+            // A newly picked video is used whole; its length is only known once it has loaded.
+            this.wholeVideo = null;
+            this.shot.frames = clamp(total, 5, FPS * 600);
+            return this.commit(true);
+        }
         const pct = frames => `${clamp(frames / total, 0, 1) * 100}%`;
         const win = h("div.window", { style: { left: pct(clip.start), width: pct(length) }, title: "拖动：选择用素材的哪一段" });
         const lane = h("div.lane", { title: "点击：把选区移到这里" }, win);
@@ -845,7 +851,12 @@ class Editor {
             this.seg([["generate", "生成"], ["source", "源视频"]], shot.kind, kind => this.setKind(kind))));
         if (shot.kind === "source") {
             parts.push(this.field("源视频（24fps 时间轴，可为任意帧率）",
-                this.slot(shot.source.media, { accept: "video/*", graph: ["video", "image"], onpick: m => { shot.source.media = m; this.commit(true); } }),
+                this.slot(shot.source.media, { accept: "video/*", graph: ["video", "image"], onpick: m => {
+                    shot.source.media = m;
+                    shot.source.start = 0;
+                    this.wholeVideo = shot.source;
+                    this.commit(true);
+                } }),
                 this.privacy(shot.source)));
             parts.push(this.field("起点（秒）", this.number(shot.source, "start", { min: 0, step: 1 / FPS, scale: FPS, after: () => this.renderStage() })));
             parts.push(h("div.dim", {}, shot.source.media?.input && !this.preview(shot.source.media)?.video ? "这个连线源视频不是直接接的 LoadVideo，导演台里放不了，按秒设置起点。"
