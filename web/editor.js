@@ -2,9 +2,9 @@
 import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
 import {
-    FPS, SHARED, STAGES, canvasChain, changed, clamp, clone, effectiveRefs, features, filmSize, follows, graphInputs, h, inputPreview, mediaLabel, mediaPreview, mediaUrl,
-    queueAlone, readInputs, refCount, newLayer, newShot, pickFile, planWindows, previewRewrite, projectData, readProject, rewritable, rewriterConfig,
-    secs, sourceFile, storePrompts, totalFrames, uid, upload, widget, writeProject,
+    FPS, SHARED, STAGES, applyMode, blockLabel, canvasChain, changed, clamp, clone, effectiveRefs, filmSize, follows, graphInputs, h, inputPreview, mediaLabel, mediaPreview, mediaUrl,
+    modeSwitch, ownPrompt, queueAlone, readInputs, refCount, newLayer, newShot, pickFile, planWindows, previewRewrite, projectData, readProject, rewritable, rewriterConfig,
+    runPlan, samples, secs, shotMode, sourceFile, storePrompts, totalFrames, uid, upload, widget, writeProject,
 } from "./core.js";
 import { Painter } from "./painter.js";
 
@@ -14,7 +14,7 @@ const clipTime = frames => {
     return minutes ? `${minutes}:${(seconds - minutes * 60).toFixed(2).padStart(5, "0")}` : `${seconds.toFixed(2)}s`;
 };
 const AUDIO_LABELS = { generate: "模型生成", soundtrack: "配乐音轨（锁定）", source: "源视频原声", silent: "静音" };
-const TABS = [["story", "剧本"], ["shot", "镜头"], ["keys", "首尾帧"], ["refs", "参考"], ["repaint", "局部重绘"]];
+const TABS = [["prompts", "提示词"], ["shot", "镜头"], ["keys", "首尾帧"], ["refs", "参考"], ["repaint", "局部重绘"]];
 const SOURCES = [["paint", "手绘"], ["input", "连线遮罩"], ["text", "文字识别"], ["face", "跟随人脸"], ["box", "固定框"]];
 const boxed = layer => layer.source === "face" || layer.source === "box";
 
@@ -33,7 +33,7 @@ export function openEditor(node, panel, index, tab) {
 }
 
 class Editor {
-    constructor(node, panel, index, tab = "shot") {
+    constructor(node, panel, index, tab = "prompts") {
         this.node = node;
         this.panel = panel;
         this.project = readProject(node);
@@ -76,14 +76,16 @@ class Editor {
         this.tabs = h("div.tabs");
         this.meta = h("span.dim");
         this.status = h("span.status");
+        this.plan = h("span.plan");
         this.ruler = h("div.ruler");
         this.track = h("div.track");
         this.footerTools = h("div.row");
         const frame = h("div.frame", {},
             h("header", {},
                 h("strong", {}, "H3 导演台"), this.meta, this.status,
-                h("button", { onclick: () => this.importProject(), title: "从 JSON 文件导入镜头、参考和剧本（画幅、二采等在节点参数里）" }, "导入工程"),
+                h("button", { onclick: () => this.importProject(), title: "从 JSON 文件导入镜头、参考和提示词（画幅、二采等在节点参数里）" }, "导入工程"),
                 h("button", { onclick: () => this.exportProject() }, "导出工程"),
+                this.plan,
                 h("button.primary", { onclick: () => this.run() }, "▶ 运行全片"),
                 h("button", { onclick: () => this.close(), title: "Esc" }, "关闭")),
             h("main", {},
@@ -150,6 +152,23 @@ class Editor {
         this.view = null;
         this.trim = null;
         this.refresh();
+        this.rows?.[this.selected]?.scrollIntoView({ block: "nearest" });
+    }
+
+    /** Select from inside the prompts page, which stays as it is: the box being typed in keeps its focus and caret. */
+    pick(index) {
+        if (index === this.selected) return;
+        this.stopPlay();
+        this.selected = index;
+        this.frame = 0;
+        this.view = null;
+        this.trim = null;
+        this.rows.forEach((row, i) => row.classList.toggle("selected", i === index));
+        // Selecting opens the row's extra controls; after this click lands, so the box does not move under it.
+        requestAnimationFrame(() => this.rows[index]?.scrollIntoView({ block: "nearest" }));
+        this.renderTabs();
+        this.renderStage();
+        this.renderTimeline();
     }
 
     run() {
@@ -519,6 +538,9 @@ class Editor {
         const p = this.project, total = totalFrames(p), chain = canvasChain(p).map(([name, ...size]) => [name, size.join("×")]);
         const steps = chain.length > 1 ? ` · 画幅：${chain.map(([name, size]) => `${name} ${size}`).join(" → ")}` : "";
         this.meta.textContent = `${chain[chain.length - 1][1]}${steps} · ${p.shots.length} 镜 · ${secs(total)} · 24fps`;
+        const plan = runPlan(p);
+        this.plan.textContent = plan.text;
+        this.plan.classList.toggle("warn", plan.warn);
     }
 
     renderFooterTools() {
@@ -547,9 +569,10 @@ class Editor {
         this.project.shots.splice(this.selected + 1, 0, shot);
         this.selected += 1;
         this.frame = 0;
-        this.tab = "shot";
+        if (kind === "source") this.tab = "shot";
         this.commit(true);
         this.renderTabs();
+        this.rows?.[this.selected]?.scrollIntoView({ block: "nearest" });
     }
 
     duplicate() {
@@ -641,10 +664,10 @@ class Editor {
         const carried = w => windows[w.index + 1]?.head || 0;
         const blocks = windows.map(w => {
             const shot = w.shot, state = states[shot.id];
-            const block = h(`button.block${shot.kind === "source" ? ".source" : ""}${w.index === this.selected ? ".selected" : ""}`, {
+            const block = h(`button.block.${shotMode(shot)}${w.index === this.selected ? ".selected" : ""}`, {
                 style: { left: `${w.start * scale}px`, width: `${Math.max(4, w.keep * scale - 2)}px` },
                 "data-state": state === "complete" ? "complete" : state ? "running" : "",
-                title: `${shot.prompt || "（无提示词）"}\n${secs(w.keep)}${state ? ` · ${STAGES[state] || state}` : ""}`,
+                title: `${samples(shot) ? ownPrompt(this.project, shot) || "（无提示词）" : "保留原画，不需要提示词"}\n${secs(w.keep)}${state ? ` · ${STAGES[state] || state}` : ""}`,
                 onclick: e => {
                     this.stopPlay();
                     const local = Math.floor((e.clientX - block.getBoundingClientRect().left) / scale);
@@ -654,7 +677,7 @@ class Editor {
                 carried(w) ? h("i.carry", { style: { width: `${Math.min(carried(w), w.keep) * scale}px` }, title: "下一镜从这里续接" }) : null,
                 h("i.state"),
                 h("b", {}, `${w.index + 1} · ${secs(w.keep)}${state && state !== "complete" ? ` · ${STAGES[state] || ""}` : ""}`),
-                h("small", {}, features(shot, this.project).join(" ") || (shot.kind === "source" ? "源视频" : shot.prompt.slice(0, 40))),
+                h("small", {}, blockLabel(shot, this.project)),
                 this.marks(w, scale));
             const edge = h("span.edge", { title: "拖动调整时长" });
             edge.addEventListener("pointerdown", e => this.resizeShot(e, w));
@@ -719,11 +742,11 @@ class Editor {
 
     /** Rewritten prompts arrived: redraw the panes that show them, unless the user is editing in the side pane. */
     showPrompts() {
-        if ((this.tab === "story" || this.tab === "shot") && !this.pane.contains(document.activeElement)) this.renderInspector();
+        if (this.tab === "prompts" && !this.pane.contains(document.activeElement)) this.renderInspector();
     }
 
     renderInspector() {
-        const builders = { story: this.storyPane, shot: this.shotPane, keys: this.keysPane, refs: this.refsPane, repaint: this.repaintPane };
+        const builders = { prompts: this.promptsPane, shot: this.shotPane, keys: this.keysPane, refs: this.refsPane, repaint: this.repaintPane };
         this.pane.replaceChildren(...[builders[this.tab].call(this)].flat(3).filter(child => child != null && child !== false));
         this.renderTabs();
     }
@@ -828,19 +851,23 @@ class Editor {
         return h("div.field", {}, el, extras.length ? h("div.row", {}, ...extras) : null);
     }
 
-    insertTag(tag) {
-        const area = this.promptArea;
-        if (!area) return;
-        const at = area.selectionStart ?? area.value.length;
-        area.value = area.value.slice(0, at) + tag + area.value.slice(area.selectionEnd ?? at);
-        area.focus();
-        area.selectionStart = area.selectionEnd = at + tag.length;
-        this.shot.prompt = area.value;
-        this.commit();
+    /** [textarea editing obj[key], chips that insert the reference labels it can use]. */
+    promptBox(obj, key, tags, attrs) {
+        const save = () => { obj[key] = area.value; this.commit(); };
+        const area = h("textarea", { rows: 2, value: obj[key], oninput: save, ...attrs });
+        const insert = tag => {
+            const at = area.selectionStart ?? area.value.length;
+            area.value = area.value.slice(0, at) + tag + area.value.slice(area.selectionEnd ?? at);
+            area.focus();
+            area.selectionStart = area.selectionEnd = at + tag.length;
+            save();
+        };
+        return [area, tags.length ? h("div.chips", {}, ...tags.map(([tag, label]) => h("button", { onclick: () => insert(tag), title: label }, `${tag} ${label}`))) : null];
     }
 
-    tags() {
-        const shot = this.shot, refs = effectiveRefs(this.project, shot), out = [];
+    /** The labels a shot's prompt can use; ``head`` is its carried frames, which a first frame comes after. */
+    tags(shot, head = 0) {
+        const refs = effectiveRefs(this.project, shot), out = [];
         const scope = (kind, i, label) => i < refs.shared[kind] ? `全局${label} ${i + 1}` : `${label} ${i + 1 - refs.shared[kind]}`;
         refs.images.forEach((_, i) => out.push([`<Picture ${i + 1}>`, scope("images", i, "参考图")]));
         const source = shot.kind === "source" && shot.source.regen ? 1 : 0;
@@ -852,7 +879,7 @@ class Editor {
         });
         refs.audios.forEach((_, i) => out.push([`<Audio ${++audio}>`, scope("audios", i, "参考音频")]));
         if (!out.length && shot.keyframes.length) {
-            const ends = shot.keyframes.filter(k => k.at === -1 || (k.at === 0 && !this.win.head));
+            const ends = shot.keyframes.filter(k => k.at === -1 || (k.at === 0 && !head));
             const first = ends.find(k => k.at === 0), last = ends.find(k => k.at === -1);
             if (first) out.push(["<Picture 1>", "首帧"]);
             if (last) out.push([`<Picture ${first ? 2 : 1}>`, "尾帧"]);
@@ -860,94 +887,44 @@ class Editor {
         return out;
     }
 
-    shotPane() {
-        const shot = this.shot, w = this.win, first = this.selected === 0;
-        const parts = [];
-        parts.push(h("div.row", {}, h("b", {}, `第 ${this.selected + 1} 镜`),
-            this.seg([["generate", "生成"], ["source", "源视频"]], shot.kind, kind => this.setKind(kind))));
-        if (shot.kind === "source") {
-            parts.push(this.field("源视频（24fps 时间轴，可为任意帧率）",
-                this.slot(shot.source.media, { accept: "video/*", graph: ["video", "image"], onpick: m => {
-                    shot.source.media = m;
-                    shot.source.start = 0;
-                    this.wholeVideo = shot.source;
-                    this.commit(true);
-                } }),
-                this.privacy(shot.source)));
-            parts.push(this.field("起点（秒）", this.number(shot.source, "start", { min: 0, step: 1 / FPS, scale: FPS, after: () => this.renderStage() })));
-            parts.push(h("div.dim", {}, shot.source.media?.input && !this.preview(shot.source.media)?.video ? "这个连线源视频不是直接接的 LoadVideo，导演台里放不了，按秒设置起点。"
-                : "剪辑素材：在舞台下方的素材条上拖动选区，选出这一镜用到的那一段；拖选区右缘改时长，或播放到某一帧按 I / O 设入点 / 出点。"));
-            parts.push(this.field("改写方式", this.seg([[false, "保留原画 · 只改遮罩"], [true, "整体改写（参考 <Video 1>）"]], shot.source.regen,
-                v => { shot.source.regen = v; this.commit(true); })));
-            if (shot.source.regen) {
-                parts.push(this.field("改写强度（1 = 只参考源视频，越低越贴近原画）", this.slider(shot.source, "strength", 0.05, 1, 0.05)));
-            } else {
-                parts.push(h("div.note", {}, "保留原画：遮罩外像素原样输出。在“局部重绘”画遮罩、在“局部精修”框区域。"));
-            }
-            const held = shot.still && this.project.shots.findIndex(s => s.id === shot.still.shot);
-            if (held >= 0) parts.push(h("div.note", {}, `封面：成片里显示第 ${held + 1} 镜第 ${shot.still.frame + 1} 帧的生成结果。`));
-        }
-        parts.push(this.field("时长（秒）", h("div.row", {}, this.number(shot, "frames", { min: 5, max: FPS * 600, step: 0.125, scale: FPS, after: () => this.commit(true) }),
-            h("span.dim", {}, `生成 ${w.gen} 帧${w.head ? `（含续接 ${w.head} 帧）` : ""} · 输出 ${w.keep} 帧`))));
-        if (shot.kind === "source" && shot.source.media) {
-            const seconds = key => this.number(this.splitting, key, { min: FPS, max: 15 * FPS, step: 0.5, scale: FPS });
-            parts.push(this.field("自动分段（每段一个镜头：剪辑点处硬切，不到 1 秒的快切镜头合成一段；比最长时长还长的镜头在镜头内续接切开，切出的每段不短于最短时长）",
-                h("div.row", {}, "最短", seconds("shortest"), "秒 · 最长", seconds("longest"), "秒 · 段数",
-                    this.number(this.splitting, "segments", { min: 0, max: 99 }), h("span.dim", {}, "0 = 自动"),
-                    h("button", { disabled: this.analysing, onclick: () => this.autoSplit() }, this.analysing ? "分析中…" : "自动分段")),
-                this.analysing ? h("div.note", {}, "正在分段：分析源视频的剪辑点和动作，视频越长越久。完成前请勿修改这一镜。") : null,
-                this.check(this.splitting, "cover", "识别开头的封面帧（单独成一镜不参与生成，成片里换成它重复的那一帧的生成结果）")));
-        }
-        const source = shot.kind === "source";
-        const keepsPixels = source && !shot.source.regen;
-        if (!first && (!source || follows(this.project.shots[this.selected - 1], shot))) {
-            parts.push(h("div.field", {}, this.check(shot, "continue", source ? "接着上一镜的源视频续接（latent 续接，接缝处人物与画面连贯）"
-                : "接着上一镜继续拍（latent 续接，画面与声音连贯）", () => this.commit(true)),
-                !w.carry && shot.continue ? h("span.warn", {}, source ? "上一镜的生成长度不在 17k+5 上或工程关闭了续接，本镜直接接上。"
-                    : "上一镜过短或工程关闭了续接，本镜将硬切开始。") : null,
-                w.carry && !keepsPixels && !rewritable(this.project, shot) ? h("span.dim", {},
-                    "提示词开头先写上一镜结尾的画面（景别、机位、人物在做什么），再写新动作，整段只写一个 [Shot 1]；对不上时 H3 会在接缝附近自己切镜。") : null));
-        }
-        if (this.project.rewrite.enabled && !keepsPixels) {
-            parts.push(this.check(shot, "rewrite", "本镜自动改写（取消则直接使用下面的提示词）", () => this.commit(true)));
-        }
-        const auto = rewritable(this.project, shot);
-        const inherits = shot.inherit_prompt !== false;
-        if (auto) parts.push(this.check(shot, "inherit_prompt", "继承全局提示词（关掉则这一镜只按下面的片段提示词写）", () => this.commit(true)));
-        this.promptArea = h("textarea", {
-            rows: auto ? 4 : 9, value: shot.prompt,
-            placeholder: !auto ? "描写这一镜：人物、动作、镜头、环境、台词与声音……"
-                : inherits ? "可留空：改写模型按全局提示词写这一镜。也可以写这一镜的要求，例如：她停下脚步，回头对镜头微笑。"
-                    : "这一镜要拍什么：人物、动作、场景、声音……",
-            oninput: e => { shot.prompt = e.target.value; this.commit(); },
-        });
-        const label = !auto ? "提示词" : inherits ? "片段提示词（这一镜的要求，和全局提示词一起交给改写模型）" : "片段提示词（只按这一镜写，不看全局提示词）";
-        parts.push(this.field(label, this.promptArea,
-            h("div.chips", {}, ...this.tags().map(([tag, label]) => h("button", { onclick: () => this.insertTag(tag), title: label }, `${tag} ${label}`)))));
-        if (auto) {
-            const text = this.node.properties?.yh3Prompts?.[shot.id];
-            parts.push(this.field("改写结果", h("div.report", {}, text || "（运行或在“剧本”页生成后显示）"),
-                text ? h("button", { onclick: () => { shot.prompt = text; shot.rewrite = false; this.commit(true); } }, "采用为手写提示词") : null));
-        }
-        const audioModes = shot.kind === "source" && !shot.source.regen ? ["source", "soundtrack", "silent"] : ["generate", "soundtrack", "silent"].concat(shot.kind === "source" ? ["source"] : []);
-        parts.push(this.field("声音", h("select", {
-            onchange: e => { shot.audio = e.target.value; this.commit(true); },
-        }, ...audioModes.map(m => h("option", { value: m, selected: shot.audio === m }, AUDIO_LABELS[m])))));
-        if (shot.audio === "soundtrack") {
-            parts.push(this.field("配乐音轨（全片共用：按时间线切到每个选了配乐的镜头）",
-                this.slot(this.project.soundtrack, { accept: "audio/*,video/*", graph: ["audio", "video"], onpick: m => { this.project.soundtrack = m; this.commit(true); } })));
-        }
-        parts.push(h("div.row", {}, this.reseed(shot), this.project.refine.enabled ? this.check(shot, "refine", "参与二采") : null));
-        return parts;
+    /** All the prompts of the film on one page, each next to the choice that decides whether it is used. */
+    promptsPane() {
+        const p = this.project, config = rewriterConfig(this.node), rewriting = p.rewrite.enabled;
+        const sources = p.shots.filter(s => s.kind === "source" && !s.still);
+        const rewrites = p.shots.some(s => shotMode(s) === "rewrite");
+        const shared = newShot(rewrites ? "source" : "generate");
+        if (rewrites) shared.source.regen = true;
+        const [story, storyTags] = this.promptBox(p, "story", this.tags(shared), { placeholder: rewriting
+            ? "整部片的剧情、人物、风格和场景。例如：雨夜，穿红雨衣的女孩走在霓虹街头，回头一笑，走进咖啡馆。"
+            : "例如：Replace only the man in the white shirt in <Video 1> with the character in <Picture 1>; inherit his movement frame by frame; keep everything else." });
+        const images = p.refs.images;
+        this.rows = this.windows.map(w => this.promptRow(w));
+        return [
+            h("div.globals", {},
+                this.field(rewriting ? "全局提示词：改写模型据此写每一镜" : "全局提示词：没写提示词的镜头直接用它", story, storyTags),
+                h("div.field", {}, h("span", {}, "全局参考图：每一镜都带上"),
+                    h("div.slots.thumbs", {},
+                        ...images.map((m, i) => this.slot(m.media, { tag: `<Picture ${i + 1}>`, onpick: v => { v ? (m.media = v) : images.splice(i, 1); this.commit(true); } })),
+                        this.slot(null, { onpick: m => { if (m) { images.push({ media: m, fit: "auto", ...SHARED }); this.commit(true); } } }))),
+                this.rewriteControls(config)),
+            sources.length > 1 ? h("div.row", {}, h("span.grow"), h("span.dim", {}, `${sources.length} 个源视频镜头全部设为`),
+                h("button", { onclick: () => this.setAllSources("rewrite") }, "整体改写"),
+                h("button", { onclick: () => this.setAllSources("keep") }, "保留原画")) : null,
+            h("div.shots", {}, ...this.rows),
+            this.result?.report?.length ? [h("b", {}, "上次运行"), h("div.report", {}, this.result.report.join("\n"))] : null,
+        ];
     }
 
-    storyPane() {
-        const p = this.project, config = rewriterConfig(this.node);
-        const prompts = this.node.properties?.yh3Prompts || {};
+    rewriteControls(config) {
+        const p = this.project, rewriting = p.rewrite.enabled;
+        const toggle = h("label.row", {}, h("input", { type: "checkbox", checked: rewriting, disabled: !config && !rewriting,
+            onchange: e => { p.rewrite.enabled = e.target.checked; this.commit(true); } }), "自动改写提示词");
+        const model = h("span.dim", {}, config ? `${config.provider}:${config.model}` : "要用它，先把“Yogurt H3 改写模型”接到导演台的 rewriter");
+        if (!rewriting) return h("div.row", {}, toggle, model);
+        const targets = p.shots.filter(s => rewritable(p, s)).length;
         const status = h("div.dim", {}, (this.node.properties?.yh3RewriteReport || []).join("；"));
-        const run = async all => {
-            p.rewrite.enabled = true;
-            if (all) p.rewrite.seed = (p.rewrite.seed || 0) + 1;
+        const run = async again => {
+            if (again) p.rewrite.seed = (p.rewrite.seed || 0) + 1;
             this.commit();
             status.className = "dim";
             status.textContent = "改写中…改写模型正在读 H3 写作指南并逐镜编写，通常需要几十秒。";
@@ -960,42 +937,129 @@ class Editor {
                 status.textContent = error.message;
             }
         };
-        return [
-            h("div.note", {}, "全局提示词写整部片的情况，打开自动改写后交给改写模型（deepagents + MiniMax h3-prompt-writing 技能）作为背景；它按时间线上每一镜的时长、续接、首尾帧、参考素材和声音，判断这一镜该拍什么，写成完整的 H3 提示词。每镜的片段提示词是这一镜自己的要求，可写可不写；某一镜关掉“继承全局提示词”就只按它自己的写。不开自动改写时只用片段提示词。"),
-            config ? h("div.row", {}, h("span.dim", {}, "改写模型"), h("b", {}, `${config.provider}:${config.model}`), config.vision ? h("span.dim", {}, "· 看图") : null)
-                : h("div.warn", {}, "还没有把“Yogurt H3 改写模型”节点连接到导演台的 rewriter。"),
-            this.check(p.rewrite, "enabled", "自动改写提示词（运行时按剧情写每一镜）", () => this.commit(true)),
-            this.field("全局提示词（整部片的剧情、人物、风格、场景）", h("textarea", { rows: 8, value: p.story, placeholder: "例如：雨夜，穿红雨衣的女孩独自走在霓虹街头，停下来回头一笑，然后走进一家咖啡馆，在窗边坐下。",
-                oninput: e => { p.story = e.target.value; this.commit(); } })),
-            this.field("全局要求（风格、语言、节奏，可留空）", h("textarea", { rows: 3, value: p.rewrite.notes, placeholder: "例如：写实电影感，镜头克制；台词用中文。",
-                oninput: e => { p.rewrite.notes = e.target.value; this.commit(); } })),
-            h("div.row", {}, h("button.primary", { onclick: () => run(false), disabled: !config }, "生成剧本（只改写，不渲染）"),
-                h("button", { onclick: () => run(true), disabled: !config, title: "换一个改写结果；所有自动改写的镜头都会重写" }, "全部重新改写")),
-            status,
-            h("b", {}, "各镜提示词"),
-            ...this.windows.map(w => {
-                const shot = w.shot, auto = rewritable(p, shot);
-                const text = auto ? prompts[shot.id] : shot.prompt;
-                return h("div.card", {},
-                    h("header.row", {}, h("b", {}, `第 ${w.index + 1} 镜 · ${secs(w.keep)}`),
-                        h("span.dim", {}, auto ? (text ? "自动改写" : "待改写") + (shot.inherit_prompt === false ? " · 不继承全局" : "") : "手写"), h("span.grow"),
-                        h("button.ghost", { onclick: () => { this.select(w.index); this.tab = "shot"; this.renderTabs(); this.renderInspector(); } }, "编辑本镜"),
-                        auto && text ? h("button", { onclick: () => { shot.prompt = text; shot.rewrite = false; this.commit(true); } }, "采用为手写") : null),
-                    auto && shot.prompt ? h("div.dim", {}, `片段提示词：${shot.prompt}`) : null,
-                    h("div.report", {}, text || (auto ? "（运行或点“生成剧本”后显示）" : "（空）")));
-            }),
-            this.result?.report?.length ? [h("b", {}, "上次运行"), h("div.report", {}, this.result.report.join("\n"))] : null,
-        ];
+        const [notes] = this.promptBox(p.rewrite, "notes", [], { placeholder: "全局要求，可留空。例如：写实电影感，镜头克制；台词用中文。" });
+        return h("div.field", {}, h("div.row", {}, toggle, model),
+            config ? null : h("div.warn", {}, "还没有接改写模型，运行会报错：接上“Yogurt H3 改写模型”，或关掉自动改写。"),
+            targets ? null : h("div.warn", {}, "现在没有要改写的镜头：保留原画的镜头不走 H3。把下面的镜头切到“整体改写”或“生成”。"),
+            notes,
+            h("div.row", {}, h("button.primary", { onclick: () => run(false), disabled: !config || !targets }, "只改写，不渲染"),
+                h("button", { onclick: () => run(true), disabled: !config || !targets, title: "换一个改写结果；所有自动改写的镜头都会重写" }, "全部重写")),
+            status);
     }
 
-    setKind(kind) {
-        const shot = this.shot;
-        if (shot.kind === kind) return;
-        shot.kind = kind;
-        shot.source = kind === "source" ? { media: null, start: 0, regen: false, strength: 1, ...SHARED } : null;
-        shot.audio = kind === "source" ? "source" : "generate";
-        shot.continue = kind === "generate";
+    promptRow(w) {
+        const shot = w.shot, mode = shotMode(shot), auto = rewritable(this.project, shot), source = shot.kind === "source";
+        const body = [], more = [];
+        if (source && !shot.source.media) {
+            body.push(this.slot(null, { accept: "video/*", graph: ["video", "image"], onpick: m => this.setSource(shot, m) }));
+        }
+        if (source && shot.source.media && !shot.still && shot.frames > this.splitting.longest) {
+            body.push(h("div.row", {}, h("span.dim.grow", {}, `这一镜 ${secs(shot.frames)}。H3 跟不住窗口里的剪辑，长视频先分段。`), this.splitButton()));
+            if (this.analysing && shot === this.shot) body.push(this.splitNote());
+        }
+        if (shot.still) {
+            const held = this.project.shots.findIndex(s => s.id === shot.still.shot);
+            body.push(h("div.dim", {}, `封面：成片里显示第 ${held + 1} 镜第 ${shot.still.frame + 1} 帧的结果，不需要提示词。`));
+        } else if (!samples(shot)) {
+            body.push(h("div.dim", {}, "这一镜直接用源视频，不生成，提示词不起作用。要让 H3 重画这段，选“整体改写”。"));
+        } else {
+            const [area, chips] = this.promptBox(shot, "prompt", this.tags(shot, w.head), { placeholder: mode === "keep" ? "遮罩区域的提示词；遮罩外保留原画"
+                : auto ? "这一镜的要点，可留空：改写模型按全局提示词写"
+                    : shot.inherit_prompt !== false ? "这一镜的提示词，留空则用全局提示词" : "这一镜的提示词" });
+            body.push(area);
+            if (auto) body.push(this.rewriteResult(shot));
+            more.push(chips);
+            if (w.carry && !auto) more.push(h("div.dim", {}, "续接：提示词开头先写上一镜结尾的画面（景别、机位、人物在做什么），再写新动作，整段只写一个 [Shot 1]；对不上时 H3 会在接缝附近自己切镜。"));
+            if (mode === "rewrite") more.push(this.field("改写强度：1 才会换掉人物，越低越贴近原画", this.slider(shot.source, "strength", 0.05, 1, 0.05)));
+            if (mode !== "keep") {
+                more.push(h("div.row", {},
+                    this.project.rewrite.enabled ? this.check(shot, "rewrite", "本镜自动改写", () => this.commit(true)) : null,
+                    this.check(shot, "inherit_prompt", "继承全局提示词", () => this.commit(true)), h("span.grow"), this.reseed(shot)));
+            }
+            shot.repaints.forEach((layer, i) => {
+                if (layer.enabled !== false) more.push(this.field(`重绘 ${i + 1} 的提示词`, this.promptBox(layer, "prompt", [], { placeholder: "留空沿用这一镜的提示词" })[0]));
+            });
+        }
+        return h(`div.shot.${mode}${w.index === this.selected ? ".selected" : ""}`, { onpointerdown: () => this.pick(w.index), onfocusin: () => this.pick(w.index) },
+            h("div.row", {}, h("b", {}, `第 ${w.index + 1} 镜`), h("span.dim", {}, `${secs(w.keep)}${w.carry ? "，续接上一镜" : ""}`), h("span.grow"),
+                shot.still ? null : modeSwitch(shot, m => this.setMode(shot, m))),
+            ...body, more.some(Boolean) ? h("div.more", {}, ...more) : null);
+    }
+
+    rewriteResult(shot) {
+        const text = this.node.properties?.yh3Prompts?.[shot.id];
+        if (!text) return h("div.dim", {}, "改写结果：运行或点“只改写”后显示");
+        return h("details", {}, h("summary", {}, `改写结果：${text.slice(0, 80)}`), h("div.report", {}, text),
+            h("button", { onclick: () => { shot.prompt = text; shot.rewrite = false; this.commit(true); } }, "采用为手写提示词"));
+    }
+
+    setMode(shot, mode) {
+        applyMode(shot, mode);
         this.commit(true);
+    }
+
+    setAllSources(mode) {
+        for (const shot of this.project.shots) if (shot.kind === "source" && !shot.still) applyMode(shot, mode);
+        this.commit(true);
+    }
+
+    setSource(shot, media) {
+        shot.source.media = media;
+        shot.source.start = 0;
+        this.wholeVideo = shot.source;
+        this.commit(true);
+    }
+
+    splitButton() {
+        return h("button", { disabled: this.analysing, onclick: () => this.autoSplit() }, this.analysing ? "分析中…" : "自动分段");
+    }
+
+    splitNote() {
+        return h("div.note", {}, "正在分段：分析源视频的剪辑点和动作，视频越长越久。完成前请勿修改这一镜。");
+    }
+
+    shotPane() {
+        const shot = this.shot, w = this.win, first = this.selected === 0;
+        const parts = [];
+        parts.push(h("div.row", {}, h("b", {}, `第 ${this.selected + 1} 镜`), shot.still ? null : modeSwitch(shot, m => this.setMode(shot, m))));
+        if (shot.kind === "source") {
+            parts.push(this.field("源视频（24fps 时间轴，可为任意帧率）",
+                this.slot(shot.source.media, { accept: "video/*", graph: ["video", "image"], onpick: m => this.setSource(shot, m) }),
+                this.privacy(shot.source)));
+            parts.push(this.field("起点（秒）", this.number(shot.source, "start", { min: 0, step: 1 / FPS, scale: FPS, after: () => this.renderStage() })));
+            parts.push(h("div.dim", {}, shot.source.media?.input && !this.preview(shot.source.media)?.video ? "这个连线源视频不是直接接的 LoadVideo，导演台里放不了，按秒设置起点。"
+                : "剪辑素材：在舞台下方的素材条上拖动选区，选出这一镜用到的那一段；拖选区右缘改时长，或播放到某一帧按 I / O 设入点 / 出点。"));
+            if (!shot.source.regen) parts.push(h("div.note", {}, "保留原画：遮罩外像素原样输出。在“局部重绘”画遮罩、框区域。"));
+            const held = shot.still && this.project.shots.findIndex(s => s.id === shot.still.shot);
+            if (held >= 0) parts.push(h("div.note", {}, `封面：成片里显示第 ${held + 1} 镜第 ${shot.still.frame + 1} 帧的结果。`));
+        }
+        parts.push(this.field("时长（秒）", h("div.row", {}, this.number(shot, "frames", { min: 5, max: FPS * 600, step: 0.125, scale: FPS, after: () => this.commit(true) }),
+            h("span.dim", {}, `生成 ${w.gen} 帧${w.head ? `（含续接 ${w.head} 帧）` : ""} · 输出 ${w.keep} 帧`))));
+        if (shot.kind === "source" && shot.source.media) {
+            const seconds = key => this.number(this.splitting, key, { min: FPS, max: 15 * FPS, step: 0.5, scale: FPS });
+            parts.push(this.field("自动分段（每段一个镜头：剪辑点处硬切，不到 1 秒的快切镜头合成一段；比最长时长还长的镜头在镜头内续接切开，切出的每段不短于最短时长）",
+                h("div.row", {}, "最短", seconds("shortest"), "秒 · 最长", seconds("longest"), "秒 · 段数",
+                    this.number(this.splitting, "segments", { min: 0, max: 99 }), h("span.dim", {}, "0 = 自动"), this.splitButton()),
+                this.analysing ? this.splitNote() : null,
+                this.check(this.splitting, "cover", "识别开头的封面帧（单独成一镜不参与生成，成片里换成它重复的那一帧的生成结果）")));
+        }
+        const source = shot.kind === "source";
+        if (!first && (!source || follows(this.project.shots[this.selected - 1], shot))) {
+            parts.push(h("div.field", {}, this.check(shot, "continue", source ? "接着上一镜的源视频续接（latent 续接，接缝处人物与画面连贯）"
+                : "接着上一镜继续拍（latent 续接，画面与声音连贯）", () => this.commit(true)),
+                !w.carry && shot.continue ? h("span.warn", {}, source ? "上一镜的生成长度不在 17k+5 上或工程关闭了续接，本镜直接接上。"
+                    : "上一镜过短或工程关闭了续接，本镜将硬切开始。") : null));
+        }
+        const audioModes = shot.kind === "source" && !shot.source.regen ? ["source", "soundtrack", "silent"] : ["generate", "soundtrack", "silent"].concat(shot.kind === "source" ? ["source"] : []);
+        parts.push(this.field("声音", h("select", {
+            onchange: e => { shot.audio = e.target.value; this.commit(true); },
+        }, ...audioModes.map(m => h("option", { value: m, selected: shot.audio === m }, AUDIO_LABELS[m])))));
+        if (shot.audio === "soundtrack") {
+            parts.push(this.field("配乐音轨（全片共用：按时间线切到每个选了配乐的镜头）",
+                this.slot(this.project.soundtrack, { accept: "audio/*,video/*", graph: ["audio", "video"], onpick: m => { this.project.soundtrack = m; this.commit(true); } })));
+        }
+        parts.push(h("div.row", {}, this.reseed(shot), this.project.refine.enabled ? this.check(shot, "refine", "参与二采") : null));
+        return parts;
     }
 
     keysPane() {
@@ -1086,7 +1150,7 @@ class Editor {
         const source = shot.kind === "source" && shot.source.regen ? 1 : 0;
         const shared = effectiveRefs(p, shot).shared;
         return [
-            h("div.note", {}, "参考素材让模型保持人物、服装、场景或声音（官方 R2V）。提示词里用 <Picture N> / <Video N> / <Audio N> 指代，编号见“镜头”页的标签；带参考的镜头使用 ref_model。H3 每段建议合计不超过 9 张图、3 段视频、3 段音频。"),
+            h("div.note", {}, "参考素材让模型保持人物、服装、场景或声音（官方 R2V）。提示词里用 <Picture N> / <Video N> / <Audio N> 指代，“提示词”页的提示词框下面可以直接点标签插入；带参考的镜头使用 ref_model。H3 每段建议合计不超过 9 张图、3 段视频、3 段音频。"),
             h("b", {}, "全局参考（每一段都带上）"),
             ...this.refSlots(p.refs, { images: 0, videos: source }),
             h("b", {}, `第 ${this.selected + 1} 镜参考`),

@@ -14,6 +14,31 @@ def build(*shots, settings=None, **extra):
     return project.load_project(json.dumps({"shots": list(shots), **extra}), {"width": 128, "height": 64, **(settings or {})})
 
 
+class PromptTests(unittest.TestCase):
+    SOURCE = {"media": {"filename": "clip.mp4", "subfolder": "", "type": "input"}}
+    LAYER = {"source": "box", "box": [0.1, 0.1, 0.5, 0.5]}
+
+    def prompts(self, *shots, rewrite=False):
+        loaded = build(*shots, story="全局", rewrite={"enabled": rewrite})
+        return [shot["prompt"] for shot in loaded["shots"]]
+
+    def test_a_shot_without_a_prompt_uses_the_global_one(self):
+        self.assertEqual(self.prompts({"prompt": ""}, {"prompt": "  "}, {"prompt": "本镜"}), ["全局", "全局", "本镜"])
+
+    def test_a_source_rewrite_uses_it_too(self):
+        self.assertEqual(self.prompts({"kind": "source", "source": {**self.SOURCE, "regen": True}}), ["全局"])
+
+    def test_a_shot_that_does_not_inherit_keeps_its_empty_prompt(self):
+        self.assertEqual(self.prompts({"inherit_prompt": False}), [""])
+
+    def test_the_rewrite_model_writes_from_the_global_prompt_itself(self):
+        self.assertEqual(self.prompts({}, {"rewrite": False}, rewrite=True), ["", "全局"])
+
+    def test_a_kept_source_takes_it_only_for_its_repaint_layers(self):
+        kept = {"kind": "source", "source": self.SOURCE}
+        self.assertEqual(self.prompts(kept, {**kept, "repaints": [self.LAYER]}, rewrite=True), ["", "全局"])
+
+
 class LayerTests(unittest.TestCase):
     def layers(self, *items):
         shot = build({"frames": 30, "repaints": list(items)})["shots"][0]

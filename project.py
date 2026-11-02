@@ -298,6 +298,13 @@ def load_project(text, settings=None):
     if not s["detail"]:
         for shot in project["shots"]:
             shot["details"] = []
+    for shot in project["shots"]:
+        kept = shot["kind"] == "source" and not shot["source"]["regen"]
+        # A shot without a prompt uses the global one, unless the rewrite model writes it from there. A kept source
+        # with nothing to repaint has no use for a prompt: its cached frames must not follow the global one.
+        if shot["inherit_prompt"] and not shot["prompt"].strip() and not (project["rewrite"]["enabled"] and shot["rewrite"] and not kept) \
+                and not (kept and not shot["repaints"] and not shot["details"]):
+            shot["prompt"] = project["story"]
     # The editor's 预览 runs one layer's mask instead of the film.
     preview = data.get("mask_preview")
     project["preview"] = {"layer": str(preview["layer"])} if isinstance(preview, dict) and preview.get("layer") else None

@@ -2,8 +2,8 @@
 import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
 import {
-    FPS, NODE, PHASES, STAGES, changed, clamp, effectiveRefs, features, filmSize, h, mediaLabel, mediaPreview, newShot, planWindows, readInputs, readProject,
-    rewritable, secs, storePrompts, totalFrames, widget, writeProject,
+    FPS, NODE, PHASES, STAGES, applyMode, blockLabel, changed, clamp, effectiveRefs, filmSize, h, mediaLabel, mediaPreview, modeSwitch, newShot, ownPrompt, planWindows,
+    readInputs, readProject, rewritable, runPlan, samples, secs, shotMode, storePrompts, totalFrames, widget, writeProject,
 } from "./core.js";
 import { openEditor } from "./editor.js";
 
@@ -42,6 +42,7 @@ class Panel {
         });
         this.promptLabel = h("span");
         this.result = h("div.result");
+        this.plan = h("div.plan");
         this.live = h("img", { alt: "", hidden: true });
         this.phaseText = h("b");
         this.detailText = h("span.dim.grow");
@@ -54,7 +55,7 @@ class Panel {
             h("header", {}, h("strong", {}, "H3 导演台"), this.meta, h("button.primary", { onclick: () => this.open() }, "打开导演台")),
             this.strip, this.runbox, this.quick, this.refs,
             h("label.field.storyf", {}, h("span", {}, "全局提示词"), this.story),
-            h("label.field", {}, this.promptLabel, this.prompt), this.result,
+            h("label.field", {}, this.promptLabel, this.prompt), this.result, this.plan,
             h("div.row", {}, this.status, h("span.grow"),
                 h("button", { onclick: () => this.addShot() }, "+ 镜头"),
                 h("button.primary", { onclick: () => { app.queuePrompt(0, 1); this.say("已加入队列。"); } }, "▶ 运行")));
@@ -191,21 +192,21 @@ class Panel {
     renderStrip() {
         const project = readProject(this.node), windows = planWindows(project);
         const prompts = this.node.properties?.yh3Prompts || {};
-        const shown = shot => (rewritable(project, shot) && prompts[shot.id]) || shot.prompt;
+        const shown = shot => (rewritable(project, shot) && prompts[shot.id]) || (samples(shot) && ownPrompt(project, shot));
         const running = this.run && !this.run.end;
         this.strip.replaceChildren(...windows.map(w => {
             const id = w.shot.id, idle = this.states[id];
             const [state, label] = this.run ? this.blockState(id)
                 : [idle === "complete" ? "complete" : idle ? "running" : "", idle && idle !== "complete" ? STAGES[idle] || idle : null];
             const step = running && this.run.shot === id && this.run.step?.max ? this.run.step.value / this.run.step.max : null;
-            return h(`button.block${w.shot.kind === "source" ? ".source" : ""}${w.index === this.selected ? ".selected" : ""}`, {
+            return h(`button.block.${shotMode(w.shot)}${w.index === this.selected ? ".selected" : ""}`, {
                 style: { flex: `${w.keep} 1 0` }, "data-state": state,
-                title: `${shown(w.shot) || "（无提示词）"}\n${secs(w.keep)}`,
+                title: `${shown(w.shot) || (samples(w.shot) ? "（无提示词）" : "保留原画，不需要提示词")}\n${secs(w.keep)}`,
                 onclick: () => this.select(w.index), ondblclick: () => this.open(w.index),
             }, windows[w.index + 1]?.head ? h("i.carry", { style: { width: `${Math.min(100, 100 * windows[w.index + 1].head / w.keep)}%` } }) : null, h("i.state"),
                 step != null ? h("i.fill", { style: { width: `${(step * 100).toFixed(1)}%` } }) : null,
                 h("b", {}, `${w.index + 1} · ${secs(w.keep)}`),
-                h("small", {}, label || features(w.shot, project).join(" ") || (w.shot.kind === "source" ? "源视频" : "生成")));
+                h("small", {}, label || blockLabel(w.shot, project)));
         }));
     }
 
@@ -267,19 +268,30 @@ class Panel {
                 this.refresh();
             },
         });
-        this.quick.replaceChildren(h("b", {}, `第 ${this.selected + 1} 镜`), h("span.dim", {}, shot.kind === "source" ? "源视频" : "生成"),
+        this.quick.replaceChildren(h("b", {}, `第 ${this.selected + 1} 镜`),
+            shot.still ? h("span.dim", {}, "封面") : modeSwitch(shot, mode => {
+                const p = readProject(this.node);
+                applyMode(p.shots[this.selected], mode);
+                writeProject(this.node, p);
+                this.refresh();
+            }),
             h("label.row", {}, "时长", seconds, "秒"), h("label.row", {}, carry, "续接上一镜"),
             h("span.dim", {}, `输出 ${w.keep} 帧`));
         this.renderRefs(project, shot);
         if (document.activeElement !== this.story) this.story.value = project.story;
         this.story.placeholder = project.rewrite.enabled ? "整部片的剧情、人物、风格和场景；改写模型据此写每一镜。"
-            : "整部片的剧情、人物、风格和场景。只在打开自动改写后生效（改写模型据此写每一镜），不改写时只用各镜提示词。";
+            : "没写提示词的镜头直接用这里的内容。";
         if (document.activeElement !== this.prompt) this.prompt.value = shot.prompt;
-        const auto = rewritable(project, shot);
+        const auto = rewritable(project, shot), idle = !samples(shot);
         this.promptLabel.textContent = `第 ${this.selected + 1} 镜提示词`;
-        this.prompt.placeholder = auto ? "本镜要点（自动改写开启，可留空）" : "本镜提示词";
+        this.prompt.disabled = idle;
+        this.prompt.placeholder = idle ? "这一镜直接用源视频，不生成，提示词不起作用。要让 H3 重画这段，选“整体改写”。"
+            : auto ? "这一镜的要点，可留空：改写模型按全局提示词写" : "这一镜的提示词，留空则用全局提示词";
         this.result.hidden = !auto;
-        this.result.replaceChildren(h("b", {}, "改写结果　"), prompts[shot.id] || "（运行，或在导演台“剧本”页点“生成剧本”后显示）");
+        this.result.replaceChildren(h("b", {}, "改写结果　"), prompts[shot.id] || "（运行，或在导演台“提示词”页点“只改写”后显示）");
+        const plan = runPlan(project);
+        this.plan.textContent = plan.text;
+        this.plan.classList.toggle("warn", plan.warn);
         this.notify();
     }
 }
@@ -298,12 +310,12 @@ function setup(node) {
         const w = widget(node, name), callback = w?.callback;
         if (w) w.callback = function () { const result = callback?.apply(this, arguments); panel.refresh(); return result; };
     }
-    // Room for the run progress, references, both prompts and the rewrite result at their minimum heights.
-    const dom = node.addDOMWidget("director", "yh3director", panel.root, { serialize: false, hideOnZoom: false, getMinHeight: () => 530 });
+    // Room for the run progress, references, both prompts, the rewrite result and the run plan at their minimum heights.
+    const dom = node.addDOMWidget("director", "yh3director", panel.root, { serialize: false, hideOnZoom: false, getMinHeight: () => 590 });
     dom.serialize = false;
-    dom.computeLayoutSize = () => ({ minHeight: 530, minWidth: 460 });
+    dom.computeLayoutSize = () => ({ minHeight: 590, minWidth: 460 });
     node.yh3Panel = panel;
-    node.setSize([Math.max(node.size[0], 520), Math.max(node.size[1], 740)]);
+    node.setSize([Math.max(node.size[0], 520), Math.max(node.size[1], 800)]);
     panel.refresh();
 }
 

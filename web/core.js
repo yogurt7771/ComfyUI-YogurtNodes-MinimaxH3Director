@@ -25,11 +25,13 @@ export const clone = value => JSON.parse(JSON.stringify(value));
 /** Every image or video the rewrite AI could see: shown to it by default, or kept private with optional words instead. */
 export const SHARED = { share: true, description: "" };
 
+const newSource = () => ({ media: null, start: 0, regen: false, strength: 1, ...SHARED });
+
 export function newShot(kind = "generate") {
     return {
         id: uid(), kind, frames: 121, prompt: "", continue: kind === "generate", seed: 0, keyframes: [],
         refs: { images: [], videos: [], audios: [] },
-        source: kind === "source" ? { media: null, start: 0, regen: false, strength: 1, ...SHARED } : null,
+        source: kind === "source" ? newSource() : null,
         audio: kind === "source" ? "source" : "generate", repaints: [], refine: true, rewrite: true,
         inherit_refs: true, inherit_prompt: true, ref_strength: 1,
     };
@@ -72,7 +74,7 @@ export function normalize(project) {
     out.shots = (project?.shots || []).map(({ details = [], ...shot }) => {
         const fresh = newShot(shot.kind === "source" ? "source" : "generate");
         return { ...fresh, ...shot, refs: refsOf(shot.refs), keyframes: (shot.keyframes || []).map(k => ({ fit: "auto", ...SHARED, ...k })),
-            source: shot.kind === "source" ? { ...fresh.source, ...(shot.source || {}) } : null,
+            source: shot.kind === "source" ? { ...fresh.source, ...(shot.source || {}) } : shot.source || null,
             repaints: [...(shot.repaints || []).map(layerOf), ...details.map(detailLayer)] };
     });
     if (!out.shots.length) out.shots = [newShot()];
@@ -172,6 +174,43 @@ export function graphInputs(node, ...kinds) {
 
 /** Shots whose prompt the rewrite model writes (a kept-pixel source shot only uses its own repaint prompts). */
 export const rewritable = (project, shot) => project.rewrite.enabled && shot.rewrite !== false && !(shot.kind === "source" && !shot.source?.regen);
+
+/** How a shot gets its picture. Every view shows the same three names and colors. */
+export const MODES = { generate: "生成", keep: "保留原画", rewrite: "整体改写" };
+export const shotMode = shot => (shot.kind === "generate" ? "generate" : shot.source?.regen ? "rewrite" : "keep");
+
+/** A shot switched to 生成 keeps its source video, so a wrong click on the switch costs nothing. */
+export function applyMode(shot, mode) {
+    if (mode === "generate") {
+        if (shot.kind !== "generate") Object.assign(shot, { kind: "generate", audio: "generate", continue: true });
+        return;
+    }
+    if (shot.kind !== "source") Object.assign(shot, { kind: "source", source: shot.source || newSource(), audio: "source", continue: false });
+    shot.source.regen = mode === "rewrite";
+    if (mode === "keep" && shot.audio === "generate") shot.audio = "source";
+}
+
+export function modeSwitch(shot, onpick) {
+    const current = shotMode(shot);
+    return h("div.seg.modes", {}, ...Object.entries(MODES).map(([mode, label]) =>
+        h(`button.${mode}${mode === current ? ".on" : ""}`, { onclick: () => onpick(mode) }, label)));
+}
+
+/** A shot H3 samples: everything but a source kept as it is (its repaint layers still sample). */
+export const samples = shot => shotMode(shot) !== "keep" || shot.repaints.some(layer => layer.enabled !== false);
+
+/** The prompt of a shot the rewrite model does not write: its own, else the global one (project.load_project). */
+export const ownPrompt = (project, shot) => shot.prompt.trim() || (shot.inherit_prompt !== false ? project.story.trim() : "");
+
+/** What a run will do, next to the run buttons: a film that generates nothing should never be a surprise. */
+export function runPlan(project) {
+    const sampled = project.shots.filter(samples), kept = project.shots.length - sampled.length;
+    if (!sampled.length) return { warn: true, text: "全片保留原画，运行不会改变画面" };
+    const rewritten = sampled.filter(shot => rewritable(project, shot)).length;
+    const empty = sampled.filter(shot => !rewritable(project, shot) && !ownPrompt(project, shot)).length;
+    const parts = [`将生成 ${sampled.length} 镜`, kept && `保留原画 ${kept} 镜`, rewritten && `自动改写 ${rewritten} 镜`, empty && `${empty} 镜没有提示词`];
+    return { warn: empty > 0, text: parts.filter(Boolean).join("，") };
+}
 
 /** Widget values of the 改写模型 node feeding the director's rewriter input, or null. */
 export function rewriterConfig(node) {
@@ -348,14 +387,16 @@ export function features(shot, project) {
     const marks = [];
     if (shot.keyframes.length) marks.push(shot.keyframes.some(k => k.at === -1) ? "首尾" : "关键帧");
     const refs = refCount(effectiveRefs(project, shot));
-    if (refs) marks.push(`参考${refs}`);
+    if (refs && samples(shot)) marks.push(`参考${refs}`);
     if (shot.repaints.length) marks.push(`重绘${shot.repaints.length}`);
     return marks;
 }
 
+export const blockLabel = (shot, project) => [shot.still ? "封面" : MODES[shotMode(shot)], ...features(shot, project)].join(" ");
+
 const css = `
 .yh3 { --yh3-bg:#16191d; --yh3-panel:#1f2328; --yh3-raise:#2a2f36; --yh3-line:#3a414b; --yh3-ink:#e8ecef; --yh3-dim:#9aa5b1;
-  --yh3-gen:#3fb6a8; --yh3-src:#e0a14a; --yh3-accent:#7aa7ff; --yh3-warn:#ff8a7a; --yh3-ok:#7fd37f;
+  --yh3-gen:#3fb6a8; --yh3-src:#e0a14a; --yh3-keep:#6d7683; --yh3-accent:#7aa7ff; --yh3-warn:#ff8a7a; --yh3-ok:#7fd37f;
   color:var(--yh3-ink); font:12px/1.45 "Segoe UI","Microsoft YaHei UI",sans-serif; box-sizing:border-box; }
 .yh3 *, .yh3 *::before, .yh3 *::after { box-sizing:border-box; }
 .yh3 button { font:inherit; color:var(--yh3-ink); background:var(--yh3-raise); border:1px solid var(--yh3-line); border-radius:6px; padding:5px 10px; cursor:pointer; white-space:nowrap; }
@@ -369,14 +410,27 @@ const css = `
 .yh3 input[type=range] { padding:0; accent-color:var(--yh3-accent); }
 .yh3 input[type=checkbox] { accent-color:var(--yh3-accent); }
 .yh3 textarea { width:100%; resize:vertical; min-height:72px; }
+.yh3 textarea:disabled { opacity:.45; }
+.yh3 .seg { display:inline-flex; border:1px solid var(--yh3-line); border-radius:6px; overflow:hidden; }
+.yh3 .seg button { border:0; border-radius:0; background:transparent; }
+.yh3 .seg button.on { background:#29457a; }
+.yh3 .seg.modes button { padding:3px 9px; color:var(--yh3-dim); }
+.yh3 .seg.modes button.on { color:#10141a; font-weight:600; }
+.yh3 .seg.modes button.generate.on { background:var(--yh3-gen); }
+.yh3 .seg.modes button.keep.on { background:#a4adb9; }
+.yh3 .seg.modes button.rewrite.on { background:var(--yh3-src); }
+.yh3 .plan { color:var(--yh3-dim); }
+.yh3 .plan.warn { color:var(--yh3-warn); }
 .yh3 :focus-visible { outline:2px solid var(--yh3-accent); outline-offset:1px; }
 .yh3 .dim { color:var(--yh3-dim); }
 .yh3 .row { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+.yh3 label.row:has(> input[type=checkbox]) { flex-wrap:nowrap; }
 .yh3 .grow { flex:1; min-width:0; }
 .yh3 .strip { position:relative; display:flex; gap:3px; height:54px; overflow-x:auto; overflow-y:hidden; padding:2px 0; scrollbar-width:thin; }
 .yh3 .block { position:relative; flex:none; min-width:44px; height:46px; border-radius:6px; border:1px solid transparent; padding:4px 6px; overflow:hidden; cursor:pointer;
   background:linear-gradient(180deg,#2b6f68,#205651); text-align:left; }
-.yh3 .block.source { background:linear-gradient(180deg,#8a6430,#6c4c22); }
+.yh3 .block.rewrite { background:linear-gradient(180deg,#8a6430,#6c4c22); }
+.yh3 .block.keep { background:repeating-linear-gradient(135deg,#343a43 0 6px,#2c3139 6px 12px); color:var(--yh3-dim); }
 .yh3 .block.selected { border-color:#fff; box-shadow:0 0 0 1px #fff inset; }
 .yh3 .block .carry { position:absolute; right:0; top:0; bottom:0; background:repeating-linear-gradient(135deg,#ffffff38 0 3px,transparent 3px 7px); pointer-events:none; }
 .yh3 .block b { display:block; font-size:11px; white-space:nowrap; position:relative; }
@@ -418,14 +472,15 @@ const css = `
   overflow:hidden; cursor:pointer; display:flex; align-items:center; justify-content:center; padding:2px 6px; font-size:10px; color:var(--yh3-dim); text-align:center; }
 .yh3-panel .thumb.picture { aspect-ratio:1; padding:2px; }
 .yh3-panel .thumb video { position:absolute; inset:0; width:100%; height:100%; object-fit:cover; }
-.yh3-panel .thumb .tag { position:absolute; left:2px; top:2px; z-index:1; background:#000b; border-radius:3px; padding:0 3px; font-size:9px; color:#fff; }
+.yh3-panel .thumb .tag { position:absolute; left:2px; top:2px; z-index:1; background:#000b; border-radius:3px; padding:0 3px; font-size:9px; color:#fff; white-space:nowrap; }
 .yh3-modal { position:fixed; inset:0; z-index:10000; background:#000a; display:flex; }
 .yh3-modal .frame { margin:auto; width:min(1680px,97vw); height:min(1000px,95vh); background:var(--yh3-bg); border:1px solid var(--yh3-line); border-radius:12px;
   display:grid; grid-template-rows:auto 1fr auto; overflow:hidden; box-shadow:0 20px 70px #000c; }
 .yh3-modal header { display:flex; align-items:center; gap:10px; padding:10px 14px; border-bottom:1px solid var(--yh3-line); background:var(--yh3-panel); }
 .yh3-modal header strong { font:600 17px "Bahnschrift","Segoe UI",sans-serif; letter-spacing:.04em; }
 .yh3-modal header .status { flex:1; min-width:0; color:var(--yh3-accent); display:-webkit-box; -webkit-box-orient:vertical; -webkit-line-clamp:2; overflow:hidden; }
-.yh3-modal main { display:grid; grid-template-columns:minmax(0,1fr) 400px; min-height:0; }
+.yh3-modal main { display:grid; grid-template-columns:minmax(0,1fr) 480px; min-height:0; }
+.yh3-modal header .plan { white-space:nowrap; }
 .yh3-modal .stage { display:flex; flex-direction:column; min-width:0; min-height:0; padding:12px; gap:8px; }
 .yh3-modal .viewport { position:relative; flex:1; min-height:0; display:flex; align-items:center; justify-content:center; background:#0b0d10; border-radius:8px; overflow:hidden; }
 .yh3-modal .screen { position:relative; max-width:100%; max-height:100%; }
@@ -463,9 +518,19 @@ const css = `
 .yh3-modal .slot video { width:100%; height:100%; object-fit:cover; }
 .yh3-modal .chips { display:flex; flex-wrap:wrap; gap:4px; }
 .yh3-modal .chips button { padding:2px 7px; border-radius:10px; font-size:11px; }
-.yh3-modal .seg { display:inline-flex; border:1px solid var(--yh3-line); border-radius:6px; overflow:hidden; }
-.yh3-modal .seg button { border:0; border-radius:0; background:transparent; }
-.yh3-modal .seg button.on { background:#29457a; }
+.yh3-modal .globals { display:flex; flex-direction:column; gap:8px; padding-bottom:12px; border-bottom:1px solid var(--yh3-line); }
+.yh3-modal .slots.thumbs { grid-template-columns:repeat(5,1fr); }
+.yh3-modal .pane textarea { field-sizing:content; min-height:52px; max-height:320px; }
+.yh3-modal .shots { display:flex; flex-direction:column; gap:2px; margin:0 -12px; }
+.yh3-modal .shot { display:flex; flex-direction:column; gap:6px; padding:8px 12px 10px 9px; border-left:3px solid var(--mode); }
+.yh3-modal .shot.generate { --mode:var(--yh3-gen); }
+.yh3-modal .shot.rewrite { --mode:var(--yh3-src); }
+.yh3-modal .shot.keep { --mode:var(--yh3-keep); }
+.yh3-modal .shot.selected { background:#2a2f3699; }
+.yh3-modal .shot:not(.selected) .more { display:none; }
+.yh3-modal .shot .more { display:flex; flex-direction:column; gap:6px; }
+.yh3-modal .shot .slot, .yh3-modal .pane > .field > .field > .slot { aspect-ratio:16/5; }
+.yh3-modal .shot summary { cursor:pointer; color:var(--yh3-dim); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
 .yh3-modal footer { border-top:1px solid var(--yh3-line); background:var(--yh3-panel); padding:8px 14px 10px; display:flex; flex-direction:column; gap:6px; }
 .yh3-modal .ruler { position:relative; height:16px; color:var(--yh3-dim); font-size:10px; }
 .yh3-modal .ruler span { position:absolute; top:0; border-left:1px solid var(--yh3-line); padding-left:3px; height:16px; }
