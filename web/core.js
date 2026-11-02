@@ -212,22 +212,26 @@ export function runPlan(project) {
     return { warn: empty > 0, text: parts.filter(Boolean).join("，") };
 }
 
-/** Widget values of the 改写模型 node feeding the director's rewriter input, or null. */
+const AGENT_NODES = { YogurtH3Codex: "codex", YogurtH3Claude: "claude", YogurtH3Grok: "grok" };
+
+/** Widget values of the rewriter node feeding the director's rewriter input, or null. */
 export function rewriterConfig(node) {
     const slot = node.inputs?.find(i => i.name === "rewriter");
     if (slot?.link == null) return null;
     const links = app.graph.links;
     const link = links.get ? links.get(slot.link) : links[slot.link];
     const source = link ? app.graph.getNodeById(link.origin_id) : null;
+    const value = name => source?.widgets?.find(w => w.name === name)?.value;
+    const agent = AGENT_NODES[source?.type];
+    if (agent) return { provider: agent, path: value("path"), model: value("model"), effort: value("effort"), vision: value("vision") };
     if (source?.type !== "YogurtH3RewriteModel") return null;
-    const value = name => source.widgets?.find(w => w.name === name)?.value;
     return { provider: value("provider"), model: value("model"), base_url: value("base_url"), api_key: value("api_key"),
         temperature: value("temperature"), max_tokens: value("max_tokens"), vision: value("vision") };
 }
 
 export async function previewRewrite(node, project) {
     const rewriter = rewriterConfig(node);
-    if (!rewriter) throw new Error("先把“Yogurt H3 改写模型”节点连接到导演台的 rewriter。");
+    if (!rewriter) throw new Error("先把“Yogurt H3 改写模型”或改写 Codex / Claude / Grok 节点连接到导演台的 rewriter。");
     const response = await api.fetchApi("/yogurt_h3/director/rewrite", {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ project: JSON.stringify(projectData(project)), settings: { width: project.width, height: project.height, overlap: project.overlap }, rewriter }),

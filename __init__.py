@@ -5,6 +5,7 @@ import asyncio
 from aiohttp import web
 from server import PromptServer
 
+from .agents import AGENTS, YogurtH3Claude, YogurtH3Codex, YogurtH3Grok, agent_config
 from .detail import detectors
 from .director import YogurtH3Director
 from .media import Media
@@ -15,8 +16,10 @@ from .split import split_source
 
 WEB_DIRECTORY = "./web"
 
-NODE_CLASS_MAPPINGS = {"YogurtH3Director": YogurtH3Director, "YogurtH3RewriteModel": YogurtH3RewriteModel}
-NODE_DISPLAY_NAME_MAPPINGS = {"YogurtH3Director": "Yogurt H3 导演台", "YogurtH3RewriteModel": "Yogurt H3 改写模型"}
+NODE_CLASS_MAPPINGS = {"YogurtH3Director": YogurtH3Director, "YogurtH3RewriteModel": YogurtH3RewriteModel,
+                       "YogurtH3Codex": YogurtH3Codex, "YogurtH3Claude": YogurtH3Claude, "YogurtH3Grok": YogurtH3Grok}
+NODE_DISPLAY_NAME_MAPPINGS = {"YogurtH3Director": "Yogurt H3 导演台", "YogurtH3RewriteModel": "Yogurt H3 改写模型",
+                              "YogurtH3Codex": "Yogurt H3 改写 Codex", "YogurtH3Claude": "Yogurt H3 改写 Claude", "YogurtH3Grok": "Yogurt H3 改写 Grok"}
 
 if getattr(PromptServer, "instance", None) is not None:
     @PromptServer.instance.routes.get("/yogurt_h3/director/detectors")
@@ -30,7 +33,8 @@ if getattr(PromptServer, "instance", None) is not None:
 
         def work():
             project = load_project(data["project"], data.get("settings"))
-            return rewrite_project(project, rewriter_config(**data["rewriter"]), Media())
+            rewriter = data["rewriter"]
+            return rewrite_project(project, agent_config(**rewriter) if rewriter["provider"] in AGENTS else rewriter_config(**rewriter), Media())
 
         try:
             _, prompts, report = await asyncio.to_thread(work)

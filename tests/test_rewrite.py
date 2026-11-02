@@ -1,8 +1,12 @@
 import base64
 from io import BytesIO
 import json
+import os
 from pathlib import Path
+import sys
 import tempfile
+import threading
+import time
 import unittest
 
 import numpy as np
@@ -12,7 +16,9 @@ from support import load, write_video
 
 director = load()
 rewrite = director.rewrite
+import comfy.model_management  # noqa: E402
 import folder_paths  # noqa: E402
+import psutil  # noqa: E402
 from langchain_core.language_models.chat_models import BaseChatModel  # noqa: E402
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage  # noqa: E402
 from langchain_core.outputs import ChatGeneration, ChatResult  # noqa: E402
@@ -235,6 +241,198 @@ class RewriteTests(unittest.TestCase):
         self.model.replies = [submit("a", "pa"), AIMessage(content="Done."), AIMessage(content="Done."), AIMessage(content="I have finished the film.")]
         with self.assertRaisesRegex(RuntimeError, "没有交回第 2、3 镜.*I have finished the film."):
             self.run_rewrite(self.project())
+
+
+FAKE_AGENT = r"""
+import json, os, re, sys, time
+from pathlib import Path
+
+home = Path(__file__).parent
+brief = Path("brief.md").read_text(encoding="utf-8")
+files = sorted(p.relative_to(".").as_posix() for p in Path(".").rglob("*") if p.is_file())
+calls = json.loads((home / "calls.json").read_text(encoding="utf-8")) if (home / "calls.json").exists() else []
+calls.append({"argv": sys.argv[1:], "brief": brief, "files": files})
+(home / "calls.json").write_text(json.dumps(calls), encoding="utf-8")
+mode = (home / "mode.txt").read_text(encoding="utf-8").strip() if (home / "mode.txt").exists() else ""
+
+
+def say(text):
+    sys.stdout.buffer.write(text.encode("utf-8"))
+
+
+if mode == "login":
+    say("Not logged in")
+    sys.exit(1)
+if mode == "hang":
+    (home / "pid.txt").write_text(str(os.getpid()))
+    time.sleep(60)
+if mode == "silent":
+    say("I would rather chat.")
+    sys.exit(0)
+if "The description:" in brief:
+    say("I will translate.===== SEGMENT 1 =====\ngirl in red\n===== END SEGMENT 1 =====\n")
+    sys.exit(0)
+wanted = [int(n) for n in re.findall(r"^## Segment (\d+) — id `[^`]+`$", brief, re.M)]
+if mode == "partial" and len(calls) == 1:
+    wanted = wanted[:1]
+say("Narration before the answer." + "".join(f"===== SEGMENT {n} =====\n雨夜 prompt {n}\n===== END SEGMENT {n} =====\n" for n in wanted))
+"""
+
+
+class AgentTests(unittest.TestCase):
+    """Real run_agent against a fake CLI behind the same kind of launcher the real ones install."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        (self.root / "input").mkdir()
+        (self.root / "output").mkdir()
+        self.saved_dirs = folder_paths.get_output_directory(), folder_paths.get_input_directory()
+        folder_paths.set_output_directory(str(self.root / "output"))
+        folder_paths.set_input_directory(str(self.root / "input"))
+        Image.fromarray(np.full((64, 128, 3), 120, dtype=np.uint8)).save(self.root / "input" / "first.png")
+        self.bin = self.root / "bin"
+        self.bin.mkdir()
+        (self.bin / "fake.py").write_text(FAKE_AGENT, encoding="utf-8")
+
+    def tearDown(self):
+        folder_paths.set_output_directory(self.saved_dirs[0])
+        folder_paths.set_input_directory(self.saved_dirs[1])
+        self.tmp.cleanup()
+
+    def cli(self, name, folder=None):
+        folder = folder or self.bin
+        fake = self.bin / "fake.py"
+        if os.name == "nt":
+            path = folder / f"{name}.cmd"
+            path.write_text(f'@"{sys.executable}" "{fake}" %*\n', encoding="utf-8")
+        else:
+            path = folder / name
+            path.write_text(f'#!/bin/sh\nexec "{sys.executable}" "{fake}" "$@"\n', encoding="utf-8")
+            path.chmod(0o755)
+        return path
+
+    def config(self, name="codex", **options):
+        return director.agents.agent_config(name, str(self.cli(name)), **options)
+
+    def calls(self):
+        return json.loads((self.bin / "calls.json").read_text(encoding="utf-8"))
+
+    def project(self):
+        shots = [{"id": "a", "frames": 48, "prompt": "", "continue": False,
+                  "keyframes": [{"at": 0, "media": {"filename": "first.png", "subfolder": "", "type": "input"}}]},
+                 {"id": "b", "frames": 48, "prompt": "她回头微笑"},
+                 {"id": "c", "frames": 48, "prompt": "", "continue": False}]
+        return director.project.load_project(json.dumps({"story": "雨夜街头 & 咖啡馆", "rewrite": {"enabled": True}, "shots": shots}), SIZE)
+
+    def run_rewrite(self, config, event=None):
+        return rewrite.rewrite_project(self.project(), config, director.media.Media(), event)
+
+    def test_the_agent_answers_every_segment_in_one_read_only_run(self):
+        events = []
+        project, prompts, report = self.run_rewrite(self.config(), lambda *event: events.append(event))
+        self.assertEqual(prompts, {"a": "雨夜 prompt 1", "b": "雨夜 prompt 2", "c": "雨夜 prompt 3"})
+        self.assertEqual([s["prompt"] for s in project["shots"]], list(prompts.values()))
+        self.assertEqual(events, [(0, "rewriting"), (0, "rewritten", "雨夜 prompt 1"), (1, "rewritten", "雨夜 prompt 2"), (2, "rewritten", "雨夜 prompt 3")])
+        self.assertIn("codex:默认模型", report[0])
+        call = self.calls()[0]
+        self.assertEqual(call["argv"][call["argv"].index("-s") + 1], "read-only")
+        # The project travels in a file: a .cmd launcher would hand command-line text to cmd.exe.
+        self.assertNotIn("雨夜", " ".join(call["argv"]))
+        self.assertIn("雨夜街头 & 咖啡馆", call["brief"])
+        self.assertIn("[Image file: image-1.jpg]", call["brief"])
+        self.assertIn("image-1.jpg", call["files"])
+        self.assertIn("skills/h3-prompt-writing/SKILL.md", call["files"])
+        self.assertIn("skills/h3-prompt-writing/references/ref-en.txt", call["files"])
+
+    def test_finished_segments_come_from_the_cache(self):
+        config = self.config()
+        self.run_rewrite(config)
+        _, prompts, report = self.run_rewrite(config)
+        self.assertEqual(len(self.calls()), 1)
+        self.assertEqual(prompts["c"], "雨夜 prompt 3")
+        self.assertIn("改写读取缓存", report[0])
+
+    def test_vision_off_sends_no_images(self):
+        self.run_rewrite(self.config(vision=False))
+        call = self.calls()[0]
+        self.assertFalse([f for f in call["files"] if f.endswith(".jpg")])
+        self.assertNotIn("[Image file:", call["brief"])
+
+    def test_segments_left_out_are_asked_for_again(self):
+        (self.bin / "mode.txt").write_text("partial", encoding="utf-8")
+        _, prompts, _ = self.run_rewrite(self.config())
+        self.assertEqual(set(prompts), {"a", "b", "c"})
+        first, second = self.calls()
+        self.assertIn("id `a` (fixed", second["brief"])
+        self.assertIn("雨夜 prompt 1", second["brief"])
+        self.assertIn("`b`, `c`", second["brief"])
+
+    def test_an_agent_that_never_answers_fails_with_its_reply(self):
+        (self.bin / "mode.txt").write_text("silent", encoding="utf-8")
+        with self.assertRaisesRegex(RuntimeError, "I would rather chat"):
+            self.run_rewrite(self.config())
+        self.assertEqual(len(self.calls()), rewrite.REMINDERS + 1)
+
+    def test_a_failed_run_reports_what_the_cli_said(self):
+        (self.bin / "mode.txt").write_text("login", encoding="utf-8")
+        with self.assertRaisesRegex(RuntimeError, "codex 运行失败.*Not logged in"):
+            self.run_rewrite(self.config())
+        self.assertEqual(len(self.calls()), 1)
+
+    def test_interrupt_stops_the_whole_process_tree(self):
+        (self.bin / "mode.txt").write_text("hang", encoding="utf-8")
+        found = []
+
+        def interrupt():
+            while not (self.bin / "pid.txt").exists():
+                time.sleep(0.1)
+            found.append(psutil.Process(int((self.bin / "pid.txt").read_text())))
+            comfy.model_management.interrupt_current_processing()
+
+        thread = threading.Thread(target=interrupt)
+        thread.start()
+        started = time.time()
+        with self.assertRaises(comfy.model_management.InterruptProcessingException):
+            director.agents.run_agent(self.config(), "brief")
+        thread.join()
+        self.assertLess(time.time() - started, 30)
+        _, alive = psutil.wait_procs(found, timeout=5)
+        self.assertEqual(alive, [])
+
+    def test_each_cli_gets_only_read_access_and_its_own_flags(self):
+        for name, flags in (("codex", ["-m", "some-model", "-c", "model_reasoning_effort=high"]),
+                            ("claude", ["--tools", "Read", "--model", "some-model", "--effort", "high"]),
+                            ("grok", ["--tools", "Read", "-m", "some-model", "--reasoning-effort", "high"])):
+            (self.bin / "calls.json").unlink(missing_ok=True)
+            director.agents.run_agent(self.config(name, model="some-model", effort="high"), "brief")
+            argv = self.calls()[0]["argv"]
+            for flag, value in zip(flags[::2], flags[1::2]):
+                self.assertEqual(argv[argv.index(flag) + 1], value, name)
+            (self.bin / "calls.json").unlink()
+            director.agents.run_agent(self.config(name), "brief")
+            argv = self.calls()[0]["argv"]
+            self.assertFalse({"-m", "--model", "--effort", "--reasoning-effort", "-c"} & set(argv), name)
+
+    def test_targets_are_translated_through_the_cli(self):
+        self.assertEqual(rewrite.english_targets(["穿红衣的女孩"], self.config()), {"穿红衣的女孩": "girl in red"})
+        self.assertIn("穿红衣的女孩", self.calls()[0]["brief"])
+
+    def test_a_workflow_can_only_run_the_cli_itself(self):
+        agent_config = director.agents.agent_config
+        with self.assertRaisesRegex(ValueError, "必须是 codex"):
+            agent_config("codex", str(self.cli("notes")))
+        with self.assertRaisesRegex(ValueError, "必须是 codex"):
+            agent_config("codex", str(self.cli("codex", self.root / "input")))
+        with self.assertRaisesRegex(FileNotFoundError, "找不到 codex"):
+            agent_config("codex", str(self.bin / "nothing" / "codex"))
+        for model in ("a&calc", "--dangerous", "a b", 'a"b', "a%PATH%"):
+            with self.assertRaisesRegex(ValueError, "模型名称不合法"):
+                agent_config("codex", str(self.cli("codex")), model=model)
+        with self.assertRaisesRegex(ValueError, "effort"):
+            agent_config("codex", str(self.cli("codex")), effort="max&calc")
+        with self.assertRaisesRegex(ValueError, "不支持"):
+            agent_config("notepad", "notepad")
 
 
 if __name__ == "__main__":

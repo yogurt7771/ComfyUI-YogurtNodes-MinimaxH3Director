@@ -919,7 +919,7 @@ class Editor {
         const p = this.project, rewriting = p.rewrite.enabled;
         const toggle = h("label.row", {}, h("input", { type: "checkbox", checked: rewriting, disabled: !config && !rewriting,
             onchange: e => { p.rewrite.enabled = e.target.checked; this.commit(true); } }), "自动改写提示词");
-        const model = h("span.dim", {}, config ? `${config.provider}:${config.model}` : "要用它，先把“Yogurt H3 改写模型”接到导演台的 rewriter");
+        const model = h("span.dim", {}, config ? `${config.provider}:${config.model || "默认模型"}` : "要用它，先把“Yogurt H3 改写模型”或改写 Codex / Claude / Grok 节点接到导演台的 rewriter");
         if (!rewriting) return h("div.row", {}, toggle, model);
         const targets = p.shots.filter(s => rewritable(p, s)).length;
         const status = h("div.dim", {}, (this.node.properties?.yh3RewriteReport || []).join("；"));
@@ -927,7 +927,7 @@ class Editor {
             if (again) p.rewrite.seed = (p.rewrite.seed || 0) + 1;
             this.commit();
             status.className = "dim";
-            status.textContent = "改写中…改写模型正在读 H3 写作指南并逐镜编写，通常需要几十秒。";
+            status.textContent = "改写中…正在读 H3 写作指南并逐镜编写，通常需要几十秒到几分钟。";
             try {
                 const data = await previewRewrite(this.node, p);
                 storePrompts(this.node, data.prompts, data.report);
@@ -939,7 +939,7 @@ class Editor {
         };
         const [notes] = this.promptBox(p.rewrite, "notes", [], { placeholder: "全局要求，可留空。例如：写实电影感，镜头克制；台词用中文。" });
         return h("div.field", {}, h("div.row", {}, toggle, model),
-            config ? null : h("div.warn", {}, "还没有接改写模型，运行会报错：接上“Yogurt H3 改写模型”，或关掉自动改写。"),
+            config ? null : h("div.warn", {}, "还没有接改写节点，运行会报错：接上“Yogurt H3 改写模型”或改写 Codex / Claude / Grok，或关掉自动改写。"),
             targets ? null : h("div.warn", {}, "现在没有要改写的镜头：保留原画的镜头不走 H3。把下面的镜头切到“整体改写”或“生成”。"),
             notes,
             h("div.row", {}, h("button.primary", { onclick: () => run(false), disabled: !config || !targets }, "只改写，不渲染"),

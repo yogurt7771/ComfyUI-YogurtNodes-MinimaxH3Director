@@ -166,7 +166,7 @@ class YogurtH3Director(io.ComfyNode):
                                tooltip="MiniMax H3 ref2va 模型：带参考素材或改写源视频的镜头使用它；不接则用 model。"),
                 io.Model.Input("refine_model", optional=True, lazy=True, tooltip="二采与放大贴回使用的模型；不接则沿用镜头的模型。"),
                 Rewriter.Input("rewriter", optional=True, lazy=True,
-                               tooltip="Yogurt H3 改写模型：工程里打开“自动改写”后，按剧情和分段情况写每一镜的 H3 提示词；也把中文识别目标翻成英文。"),
+                               tooltip="Yogurt H3 改写模型，或改写 Codex / Claude / Grok：工程里打开“自动改写”后，按剧情和分段情况写每一镜的 H3 提示词；也把中文识别目标翻成英文。"),
                 io.ModelPatch.Input("inpaint_patch", optional=True, lazy=True,
                                     tooltip="MiniMax H3 Fun ControlNet（ModelPatchLoader）：局部重绘时让遮罩区参考周围画面；不接则只用 latent 遮罩。"),
                 io.UpscaleModel.Input("upscale_model", optional=True, lazy=True, tooltip="两段式或低噪重绘的放大方式选 model 时使用。"),
@@ -227,7 +227,7 @@ class YogurtH3Director(io.ComfyNode):
         targets = _translate(spec, rewriter, report)
         if spec["rewrite"]["enabled"] and not spec["preview"]:
             if rewriter is None:
-                raise ValueError("工程打开了自动改写提示词，请把“Yogurt H3 改写模型”连接到导演台的 rewriter。")
+                raise ValueError("工程打开了自动改写提示词，请把“Yogurt H3 改写模型”或改写 Codex / Claude / Grok 节点连接到导演台的 rewriter。")
             node_id = cls.hidden.unique_id
             windows = plan_windows(spec)
             spec, prompts, report = rewrite_project(spec, rewriter, media,

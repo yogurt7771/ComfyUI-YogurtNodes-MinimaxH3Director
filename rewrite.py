@@ -17,6 +17,7 @@ import comfy.model_management
 from comfy_api.latest import io
 
 from . import cache
+from .agents import AGENTS, Rewriter, answers, run_agent
 from .cache import digest
 from .project import FPS, plan_windows
 
@@ -24,9 +25,8 @@ VERSION = "rewrite-2"
 SKILL = Path(__file__).resolve().parent / "h3-prompt-writing"
 PROVIDERS = ("openai", "anthropic", "ollama")
 REMINDERS = 2
-Rewriter = io.Custom("YOGURT_H3_REWRITER")
 
-SYSTEM_PROMPT = """You are the screenwriter of a film made of several segments generated one by one with MiniMax H3. \
+SCREENWRITER = """You are the screenwriter of a film made of several segments generated one by one with MiniMax H3. \
 Each segment is a separate H3 generation of the length given; the film is the segments played in order.
 
 Use the `h3-prompt-writing` skill. Read its SKILL.md, then the guide for each segment's mode \
@@ -49,7 +49,9 @@ describe that state first without a cut, then continue the action.
 
 Use exactly the labels listed for a segment (<Picture N>, <Video N>, <Audio N>) and no others. Keep dialogue \
 in the language the user wrote it in, using the guide's dialogue markup. Some media are withheld from you for \
-privacy: write about them only what the user's description says, and never guess how they look.
+privacy: write about them only what the user's description says, and never guess how they look."""
+
+SYSTEM_PROMPT = SCREENWRITER + """
 
 Work in two steps. First write /plan.md: one beat per requested segment in timeline order, with the \
 characters, wardrobe, setting and sound that carry across segments. Then write the requested segments one at \
@@ -57,6 +59,21 @@ a time in timeline order: finish one segment's prompt, submit it with `submit_pr
 next, continuing from the prompts already written. Prompts are saved only through `submit_prompt`, never from \
 your text replies. Keep calling tools until `submit_prompt` reports that every segment is saved: a reply without \
 a tool call ends your session."""
+
+AGENT_PROMPT = SCREENWRITER + """
+
+The skill is in skills/h3-prompt-writing under the current folder. Images mentioned below are files in the current \
+folder: open them to see them. You can read files but not change any, and nobody can answer questions, so decide \
+for yourself and finish.
+
+Plan first: one beat per requested segment in timeline order, with the characters, wardrobe, setting and sound that \
+carry across segments. Then write the requested segments in timeline order, continuing from the prompts already \
+written. Your final message must hold every requested segment in exactly this form, N being the segment's number \
+in the timeline:
+
+===== SEGMENT N =====
+the complete H3 prompt
+===== END SEGMENT N ====="""
 
 
 def rewriter_config(provider, model, base_url="", api_key="", temperature=0.7, max_tokens=8192, vision=True):
@@ -102,8 +119,6 @@ and any ":N" count after a thing. Reply with the phrase only."""
 
 def english_targets(texts, config):
     """{text: English phrase} for SAM 3 targets written in another language; one cached model call per text."""
-    from langchain_core.messages import HumanMessage, SystemMessage
-
     model = {k: v for k, v in config.items() if k != "api_key"}
     out, chat = {}, None
     for text in texts:
@@ -111,8 +126,14 @@ def english_targets(texts, config):
         if cache.exists(key, ".json"):
             out[text] = cache.read_json(key)["english"]
             continue
-        chat = chat or chat_model(config)
-        reply = str(chat.invoke([SystemMessage(TRANSLATE), HumanMessage(text)]).text).strip()
+        if config["provider"] in AGENTS:
+            reply = answers(run_agent(config, f"{TRANSLATE}\n\nAnswer in your final message, exactly like this:\n===== SEGMENT 1 =====\nthe phrase\n"
+                                              f"===== END SEGMENT 1 =====\n\nThe description:\n{text}")).get(1, "")
+        else:
+            from langchain_core.messages import HumanMessage, SystemMessage
+
+            chat = chat or chat_model(config)
+            reply = str(chat.invoke([SystemMessage(TRANSLATE), HumanMessage(text)]).text).strip()
         out[text] = reply.splitlines()[0].strip().strip('"') if reply else text
         cache.write_json(key, {"english": out[text]})
     return out
@@ -334,7 +355,7 @@ def rewrite_project(project, config, media, event=None):
             previous = windows[window.index - 1].shot if window.carry else None
             before = prompts.get(previous["id"], previous["prompt"]) if previous is not None else None
             cache.write_json(_segment_key(window, project, config, skill_id, media, before), {"prompt": prompts[window.shot["id"]]})
-        report.append(f"改写：第 {'、'.join(str(w.index + 1) for w in targets)} 镜（{config['provider']}:{config['model']}）")
+        report.append(f"改写：第 {'、'.join(str(w.index + 1) for w in targets)} 镜（{config['provider']}:{config['model'] or '默认模型'}）")
     cached = [w.index + 1 for w in windows if w.shot["id"] in prompts and w not in targets]
     if cached:
         report.append(f"改写读取缓存：第 {'、'.join(map(str, cached))} 镜")
@@ -345,9 +366,7 @@ def rewrite_project(project, config, media, event=None):
     return rewritten, prompts, report
 
 
-def _message(project, windows, targets, prompts, config, media):
-    from langchain_core.messages import HumanMessage
-
+def _content(project, windows, targets, prompts, config, media):
     target_ids = {w.shot["id"] for w in targets}
     total = sum(w.keep for w in windows)
     text = [f"# Global prompt (the whole film)\n{project['story'].strip() or '(not given — build the film from the segment prompts)'}"]
@@ -368,7 +387,7 @@ def _message(project, windows, targets, prompts, config, media):
         content += global_attachments(project, targets, media)
         for window in targets:
             content += attachments(window, media)
-    return HumanMessage(content=content)
+    return content
 
 
 def submit_tool(targets, written, event=None):
@@ -401,7 +420,45 @@ def submit_tool(targets, written, event=None):
     return submit_prompt
 
 
+def _agent_brief(content):
+    """A model message as text plus image files, since an agent CLI takes its images from disk."""
+    parts, images = [], {}
+    for block in content:
+        if block["type"] == "text":
+            parts.append(block["text"])
+        else:
+            name = f"image-{len(images) + 1}.jpg"
+            images[name] = base64.b64decode(block["image_url"]["url"].split(",", 1)[1])
+            parts.append(f"[Image file: {name}]")
+    return "\n\n".join(parts), images
+
+
+def _write_by_agent(project, windows, targets, prompts, config, media, skill, event=None):
+    """One run writes every requested segment; a run that leaves some out is followed by one for those, with the
+    finished ones marked fixed. Prompts reach the editor when a run ends: the CLIs only hand over a final message."""
+    guide = {path.lstrip("/"): text.encode("utf-8") for path, text in skill.items()}
+    written, missing, reply = {}, targets, ""
+    if event:
+        event(targets[0].index, "rewriting")
+    for _ in range(REMINDERS + 1):
+        text, images = _agent_brief(_content(project, windows, missing, {**prompts, **written}, config, media))
+        reply = run_agent(config, f"{AGENT_PROMPT}\n\n{text}", {**guide, **images})
+        found = answers(reply)
+        for window in missing:
+            if found.get(window.index + 1):
+                written[window.shot["id"]] = found[window.index + 1]
+                if event:
+                    event(window.index, "rewritten", written[window.shot["id"]])
+        missing = [w for w in missing if w.shot["id"] not in written]
+        if not missing:
+            return written
+    raise RuntimeError(f"{config['provider']} 没有交回第 {'、'.join(str(w.index + 1) for w in missing)} 镜的提示词（已重试 {REMINDERS} 次）。"
+                       + (f"它最后的回复：{reply.strip()[-300:]}" if reply.strip() else "它没有任何输出。"))
+
+
 def _write(project, windows, targets, prompts, config, media, skill, event=None):
+    if config["provider"] in AGENTS:
+        return _write_by_agent(project, windows, targets, prompts, config, media, skill, event)
     try:
         from deepagents import create_deep_agent
         from deepagents.backends.utils import create_file_data
@@ -414,7 +471,7 @@ def _write(project, windows, targets, prompts, config, media, skill, event=None)
         event(targets[0].index, "rewriting")
     agent = create_deep_agent(model=chat_model(config), tools=[submit_tool(targets, written, event)], system_prompt=SYSTEM_PROMPT,
                               skills=["/skills/"], name="yogurt-h3-screenwriter")
-    messages = [_message(project, windows, targets, prompts, config, media)]
+    messages = [HumanMessage(content=_content(project, windows, targets, prompts, config, media))]
     files = {path: create_file_data(text) for path, text in skill.items()}
     for attempt in range(REMINDERS + 1):
         for state in agent.stream({"messages": messages, "files": files}, config={"recursion_limit": 100 + 10 * len(targets)}, stream_mode="values"):

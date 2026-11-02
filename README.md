@@ -101,7 +101,7 @@ git clone https://github.com/yogurt7771/ComfyUI-YogurtNodes-MinimaxH3Director
 
 <img src="docs/images/prompts.webp" alt="提示词页" width="330" align="right">
 
-1. 把 **Yogurt H3 改写模型** 节点接到导演台的 `rewriter`。
+1. 把 **Yogurt H3 改写模型** 节点（或下面说的 Codex / Claude / Grok 节点）接到导演台的 `rewriter`。
 2. 打开导演台，默认就在 **提示词** 页。写全局提示词：整部片的剧情、人物、风格和场景。
 3. 勾上 **自动改写提示词**，需要的话在下面写语言、节奏等全局要求。
 4. 在时间线上加镜头、拖出每镜的时长。需要画面连贯的镜头，在 **镜头** 页勾 **续接上一镜**。
@@ -253,6 +253,11 @@ git clone https://github.com/yogurt7771/ComfyUI-YogurtNodes-MinimaxH3Director
 - 智能体拿到导演台实际要生成的时间线：每镜时长、续接重叠、首尾帧和中间帧的时间、参考素材标签、声音锁定方式。它先列分镜要点，再按时间顺序一镜一镜写，写后一镜时前面各镜的提示词都在上下文里。
 - 开启“看图”时，首尾帧、参考图和源视频（从入点那一帧）会发给模型，全局参考只发一次。不想让某张图离开本机，就在它下面取消“发给改写 AI 看”。模型只知道这里有个 `<Picture N>`，可以另写一段文字描述代替它。
 - 改写模型节点支持 `openai`（含兼容接口，填 `base_url`）、`anthropic`、`ollama`，模型需要支持工具调用。`api_key` 留空时读 `OPENAI_API_KEY` / `ANTHROPIC_API_KEY`（`base_url` 留空读 `OPENAI_BASE_URL`）；填写的 key 会保存在工作流里。只有打开改写并运行、点“只改写，不渲染”，或要翻译识别目标时才会请求模型服务。
+- 不想按 token 付费时，用 **Yogurt H3 改写 Codex**、**改写 Claude**、**改写 Grok** 节点代替改写模型：它们调用本机已登录的命令行，走它自己的额度，不需要 API key。先在终端登录一次（`codex login`、`claude auth login`、`grok login`）。
+  - `path` 默认从 PATH 查找，可以改成完整路径，但文件名必须是这个 CLI 本身，也不能放在 ComfyUI 的 input、output、temp 目录里，免得别人分享的工作流借此运行其他程序。
+  - `model` 留空、`effort` 选 `默认` 时，用 CLI 自己的配置。
+  - 一次运行写完所有要写的镜头，结束后一起显示，看不到逐镜进度。
+  - 它们在临时目录里只读运行：取消“发给改写 AI 看”的图不会放进去。CLI 本身仍能读本机其他文件，只是不会被告知路径。
 
 <details>
 <summary>安装 deepagents</summary>
@@ -293,7 +298,7 @@ python -m pip install deepagents --no-deps
 | `vae` / `audio_vae` | H3 视频 VAE / 音频 VAE |
 | `ref_model` | 可选，H3 ref2va；带参考或整体改写源视频的镜头使用，不接则用 `model` |
 | `refine_model` | 可选，二采和放大贴回使用的模型（例如挂了放大 LoRA 的分支），不接则沿用镜头的模型 |
-| `rewriter` | 可选，Yogurt H3 改写模型：剧情改写，以及把中文识别目标翻成英文 |
+| `rewriter` | 可选，Yogurt H3 改写模型或改写 Codex / Claude / Grok：剧情改写，以及把中文识别目标翻成英文 |
 | `inpaint_patch` | 可选，ModelPatchLoader：Fun ControlNet，原位重绘时让遮罩区参考周围画面 |
 | `upscale_model` | 可选，两段式或低噪重绘的放大方式选 `model` 时使用 |
 | `sampler` / `sigmas` | 可选，替换 `sampler_name` / `steps` + `scheduler`（如 Turbo 采样器、ManualSigmas）；重绘按强度截取噪声表尾部 |
