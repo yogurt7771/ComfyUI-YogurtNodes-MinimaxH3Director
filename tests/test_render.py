@@ -1,8 +1,10 @@
 import json
 from pathlib import Path
 import tempfile
+import threading
 from types import SimpleNamespace
 import unittest
+from unittest import mock
 
 import av
 import numpy as np
@@ -13,6 +15,7 @@ from support import FakeAudioVAE, FakeClip, FakeSampler, FakeVAE, load, models, 
 
 director = load()
 render = director.render
+import comfy.model_prefetch  # noqa: E402
 import folder_paths  # noqa: E402
 from comfy_api.latest import InputImpl  # noqa: E402
 
@@ -646,6 +649,30 @@ class RenderTests(unittest.TestCase):
             node.hidden = saved
         info = out.ui["yogurt_h3"][0]
         self.assertEqual((info["size"], info["timeline"][0]["frames"]), ([96, 64], 30))
+
+
+class SamplingTests(unittest.TestCase):
+    def test_a_window_leaves_no_allocation_graph_for_the_next(self):
+        thread = threading.get_ident()
+
+        class Guider:
+            def __init__(self, model):
+                pass
+
+            def set_conds(self, positive, negative):
+                pass
+
+            def set_cfg(self, cfg):
+                pass
+
+            def sample(self, noise, latent, *args, **kwargs):
+                comfy.model_prefetch.MALLOC_GRAPHS[thread] = SimpleNamespace(_comfy_active=False, _comfy_cuda_graph_modules=[], rogue_count=0)
+                return latent
+
+        latent = render.sampling.av_latent(torch.zeros((1, 24, 2, 4, 4)), torch.zeros((1, 32, 2, 4)))
+        with mock.patch("comfy.samplers.CFGGuider", Guider), mock.patch("latent_preview.prepare_callback", lambda model, steps: None):
+            render.sampling.sample(None, [], [], 1.0, None, torch.tensor([1.0, 0.0]), latent, 0)
+        self.assertNotIn(thread, comfy.model_prefetch.MALLOC_GRAPHS)
 
 
 if __name__ == "__main__":

@@ -4,6 +4,7 @@ import torch
 import torch.nn.functional as F
 
 import comfy.model_management
+import comfy.model_prefetch
 import comfy.sample
 import comfy.samplers
 import comfy.utils
@@ -69,8 +70,11 @@ def sample(model, positive, negative, cfg, sampler, sigmas, latent, seed, audio_
         preview(step, x0, x, total_steps)
 
     out = guider.sample(noise, samples, sampler, sigmas, denoise_mask=latent.get("noise_mask"), callback=callback,
-                        disable_pbar=not comfy.utils.PROGRESS_BAR_ENABLED, seed=seed)
-    return out.to(comfy.model_management.intermediate_device())
+                        disable_pbar=not comfy.utils.PROGRESS_BAR_ENABLED, seed=seed).to(comfy.model_management.intermediate_device())
+    # ComfyUI frees a forward's allocation graph when a node ends, and this node samples many windows: left alone, one
+    # window's graph (14.5 GiB at 135k tokens, outside torch's own count) stays in VRAM and a bigger next window runs out.
+    comfy.model_prefetch.cleanup_prefetch_queues()
+    return out
 
 
 def empty_latent(width, height, frames):
