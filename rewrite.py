@@ -21,7 +21,7 @@ from .agents import AGENTS, Rewriter, answers, run_agent
 from .cache import digest
 from .project import FPS, plan_windows
 
-VERSION = "rewrite-2"
+VERSION = "rewrite-3"
 SKILL = Path(__file__).resolve().parent / "h3-prompt-writing"
 PROVIDERS = ("openai", "anthropic", "ollama")
 REMINDERS = 2
@@ -46,6 +46,11 @@ clothing, the setting and the lighting in each prompt, worded consistently acros
 Each prompt's timeline covers exactly its segment length. Inside a segment, [Shot N] marks camera cuts. \
 A continued segment opens inside the previous segment's last moment (same picture, camera and sound): \
 describe that state first without a cut, then continue the action.
+
+A video's frames are shown once a second with their times. H3 follows your words over the video, so write the \
+timeline from those frames: who is on screen, who enters and leaves, every move and camera change at its time. \
+Never describe a state as lasting past what the frames show. If a video's frames are not shown to you, say only \
+that the action follows that video.
 
 Use exactly the labels listed for a segment (<Picture N>, <Video N>, <Audio N>) and no others. Keep dialogue \
 in the language the user wrote it in, using the guide's dialogue markup. Some media are withheld from you for \
@@ -253,10 +258,15 @@ def _image_block(image, caption):
             {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64," + base64.b64encode(buffer.getvalue()).decode()}}]
 
 
-def _video_frame(media, item, start):
+def _video_blocks(media, item, start, count, caption):
+    """What a video shows over the ``count`` frames a segment takes from it: one frame a second with its time, and the last."""
     width, height = media.video_size(item)
     scale = 512 / max(width, height)
-    return media.video(item, start, 1, max(2, round(width * scale)), max(2, round(height * scale)), "disabled")
+    frames = media.video(item, start, count, max(2, round(width * scale)), max(2, round(height * scale)), "disabled")
+    blocks = []
+    for at in sorted({*range(0, count, FPS), count - 1}):
+        blocks += _image_block(frames[at:at + 1], f"{caption} at {_seconds(at)} s:")
+    return blocks
 
 
 def _visible(media, item):
@@ -274,28 +284,27 @@ def global_attachments(project, targets, media):
             blocks += _image_block(media.image(item), f"Global reference image {i + 1} (<Picture {i + 1}> in every segment that uses global references):")
     for i, video in enumerate(refs["videos"]):
         if video["share"] and _visible(media, video["media"]):
-            blocks += _image_block(_video_frame(media, video["media"], video["start"]),
-                                   f"Global reference video {i + 1}, first frame (its <Video N> label is listed in each segment):")
+            blocks += _video_blocks(media, video["media"], video["start"], max(w.gen for w in targets),
+                                    f"Global reference video {i + 1} (its <Video N> label is listed in each segment)")
     return blocks
 
 
 def attachments(window, media):
-    """The segment's own images: keyframes, its references, guide frames and the opening frame of its videos."""
+    """The segment's own images: keyframes, its references, guide frames and its videos over the segment."""
     shot = window.shot
     blocks = []
     mode, items = labels(window)
-    starts = {id(v["media"]): v["start"] for v in shot["refs"]["videos"]}
-    if shot["source"]:
-        starts[id(shot["source"]["media"])] = shot["source"]["start"]
     for label, text, item, entry in items:
         if not _visible(media, item) or not entry["share"] or text.startswith("global reference"):
             continue
-        caption = f"Segment {window.index + 1} {label} ({text}):"
-        if label.startswith("<Video"):
-            image = _video_frame(media, item, starts[id(item)])
+        caption = f"Segment {window.index + 1} {label} ({text})"
+        if entry is shot["source"]:
+            # A carried head is the previous segment's stretch of the same video: 0.00 s of this segment's timeline.
+            blocks += _video_blocks(media, item, entry["start"] - window.head, window.head + window.keep, caption)
+        elif label.startswith("<Video"):
+            blocks += _video_blocks(media, item, entry["start"], window.gen, caption)
         else:
-            image = media.image(item)
-        blocks += _image_block(image, caption)
+            blocks += _image_block(media.image(item), caption + ":")
     for k in shot["keyframes"]:
         index = window.frame(k["at"])
         if mode == "Ref2VA" or index not in (0, window.gen - 1):

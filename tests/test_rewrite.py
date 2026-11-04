@@ -224,6 +224,24 @@ class RewriteTests(unittest.TestCase):
         self.assertIn("<Video 1>: the source video this segment rewrites", human[0]["text"])
         self.assertAlmostEqual(brightness(human[2]), 255 * 36 / 47, delta=4)
 
+    def test_source_video_is_shown_over_the_whole_segment(self):
+        write_video(Path(self.tmp.name) / "input" / "clip.mp4", 120, 128, 64)
+        media = {"filename": "clip.mp4", "subfolder": "", "type": "input"}
+        project = director.project.load_project(json.dumps({"rewrite": {"enabled": True}, "shots": [
+            {"id": "a", "kind": "source", "frames": 39, "prompt": "换人", "source": {"media": media, "start": 0, "regen": True}, "continue": False},
+            {"id": "b", "kind": "source", "frames": 30, "prompt": "换人", "source": {"media": media, "start": 39, "regen": True}, "continue": True}]}), SIZE)
+        self.model.replies = answers({"a": "pa", "b": "pb"})
+        self.run_rewrite(project)
+        blocks = self.model.seen[0][1].content
+        shown = [(blocks[i]["text"], brightness(blocks[i + 1])) for i in range(1, len(blocks) - 1) if blocks[i + 1]["type"] == "image_url"]
+        # The continued segment's timeline starts on its carried head, 22 frames before its own start.
+        expected = {"a": {0.0: 0, 1.0: 24, 1.58: 38}, "b": {0.0: 17, 1.0: 41, 2.0: 65, 2.12: 68}}
+        for number, key in ((1, "a"), (2, "b")):
+            frames = [(text, value) for text, value in shown if text.startswith(f"Segment {number} <Video 1>")]
+            self.assertEqual([text.rsplit(" at ", 1)[1] for text, _ in frames], [f"{at:.2f} s:" for at in expected[key]])
+            for (_, value), at in zip(frames, expected[key].values()):
+                self.assertAlmostEqual(value, 255 * at / 119, delta=4)
+
     def test_agent_is_reminded_when_it_stops_early(self):
         plan = AIMessage(content="", tool_calls=[{"name": "write_file", "id": "w1", "args": {"file_path": "/plan.md", "content": "1. walk 2. turn 3. cafe"}}])
         read = AIMessage(content="", tool_calls=[{"name": "read_file", "id": "r2", "args": {"file_path": "/plan.md"}}])
