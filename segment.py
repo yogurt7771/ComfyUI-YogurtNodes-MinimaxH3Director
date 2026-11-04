@@ -9,7 +9,11 @@ def track_mask(model, clip, frames, target):
         raise ValueError("文字识别遮罩需要 SAM 3：用 CheckpointLoaderSimple 加载 SAM 3 检查点（如 sam3.1_multiplex_fp16.safetensors），"
                          "MODEL 接导演台的 sam3、CLIP 接 sam3_clip。")
     conditioning = clip.encode_from_tokens_scheduled(clip.tokenize(target.get("english") or target["text"]))
-    track = SAM3_VideoTrack.execute(frames, model, conditioning=conditioning, detection_threshold=target["threshold"],
-                                    max_objects=target["objects"]).result[0]
+    try:
+        track = SAM3_VideoTrack.execute(frames, model, conditioning=conditioning, detection_threshold=target["threshold"],
+                                        max_objects=target["objects"]).result[0]
+    except UnboundLocalError as error:
+        # cublas_ops 0.0.5 fails on 4D input with a bias, which every fp16 SAM 3 block feeds its linear layers.
+        raise RuntimeError("SAM 3 用不了启动参数 --fast cublas_ops（cublas_ops 的 bug）：去掉这个参数，重启 ComfyUI。") from error
     packed = track["packed_masks"]
     return SAM3_TrackToMask.execute(track, "").result[0].float().cpu(), 0 if packed is None else packed.shape[1]
