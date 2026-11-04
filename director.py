@@ -224,7 +224,6 @@ class YogurtH3Director(io.ComfyNode):
             # 读取连线素材: only the sockets' upstream ran; return their pictures without touching any model.
             return io.NodeOutput(None, ui={"yogurt_h3_inputs": [_input_previews(sorted(media.inputs), media, cls.hidden.unique_id)]})
         prompts, report = {}, []
-        targets = _translate(spec, rewriter, report)
         if spec["rewrite"]["enabled"] and not spec["preview"]:
             if rewriter is None:
                 raise ValueError("工程打开了自动改写提示词，请把“Yogurt H3 改写模型”或改写 Codex / Claude / Grok 节点连接到导演台的 rewriter。")
@@ -232,6 +231,7 @@ class YogurtH3Director(io.ComfyNode):
             windows = plan_windows(spec)
             spec, prompts, report = rewrite_project(spec, rewriter, media,
                                                     lambda index, stage, prompt=None: send_event(node_id, windows[index].shot["id"], stage, prompt))
+        targets = _translate(spec, rewriter, report)
         models = Models(model, clip, vae, audio_vae, ref_model, refine_model, inpaint_patch, upscale_model,
                         sampler or comfy.samplers.sampler_object(sampler_name), sigmas, seed, steps, cfg, scheduler, sam3, sam3_clip)
         render = Render(cls.hidden.unique_id, cls.hidden.prompt, spec, models, media,

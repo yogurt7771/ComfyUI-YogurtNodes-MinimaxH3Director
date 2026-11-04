@@ -130,7 +130,7 @@ class Render:
     @staticmethod
     def uses_refs(shot):
         refs = shot["refs"]
-        return bool(refs["images"] or refs["videos"] or refs["audios"] or (shot["source"] and shot["source"]["regen"]))
+        return bool(refs["images"] or refs["videos"] or refs["audios"] or (shot["source"] and (shot["source"]["regen"] or shot["source"]["reference"])))
 
     @staticmethod
     def edits_source(shot):
@@ -180,7 +180,7 @@ class Render:
                 "keyframes": [[window.frame(k["at"]), identity(k["media"]), k["fit"]] for k in shot["keyframes"]],
                 "refs": [[[identity(m["media"]), m["fit"]] for m in refs["images"]], [[identity(v["media"]), v["audio"], v["start"]] for v in refs["videos"]],
                          [identity(m) for m in refs["audios"]]],
-                "source": source and [identity(source["media"]), source["start"], source["regen"], source["strength"]],
+                "source": source and [identity(source["media"]), source["start"], source["regen"], source["strength"], *(["reference"] if source["reference"] else [])],
                 "audio": [self.audio_mode(shot), lock], "ref_strength": shot["ref_strength"]}
 
     def plan(self):
@@ -366,7 +366,7 @@ class Render:
             comfy.model_management.throw_exception_if_processing_interrupted()
             self.event(i, "encoding")
             prompts = [shot["prompt"]] + [shot["repaints"][j]["prompt"] or shot["prompt"] for j in layers]
-            source = self.source_frames(window, self.width, self.height) if shot["kind"] == "source" and shot["source"]["regen"] else None
+            source = self.source_frames(window, self.width, self.height) if shot["kind"] == "source" and (shot["source"]["regen"] or shot["source"]["reference"]) else None
             self.conds[i] = shot_conditioning(window, self.project, self.media, self.m.clip, self.m.vae, self.m.audio_vae,
                                               prompts, self.m.cfg, self.width, self.height, source)
             self.keyframes[i] = encode_keyframes(self.conds[i].keyframe_images, self.m.vae, self.width, self.height)

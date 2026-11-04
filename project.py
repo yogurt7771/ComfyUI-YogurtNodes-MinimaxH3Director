@@ -7,6 +7,7 @@ from the output, so the timeline only receives ``keep`` new frames per shot.
 
 from dataclasses import dataclass
 import json
+import re
 
 from comfy_extras.nodes_minimax_h3 import align_frame_count
 
@@ -31,6 +32,8 @@ DEFAULT_PROJECT = {
     "refs": {"images": [], "videos": [], "audios": []},
     "story": "",
     "rewrite": {"enabled": False, "notes": "", "seed": 0},
+    # 替换模式: "what" is replaced with "into" in every 替换 shot; "track" limits it to what SAM 3 tracks.
+    "swap": {"enabled": False, "what": "", "into": "", "track": False, "objects": 1},
     "shots": [],
 }
 
@@ -147,7 +150,7 @@ def _shot(raw, index, global_refs):
     if kind == "source":
         raw_source = raw.get("source") or {}
         source = {"media": media(raw_source.get("media")), "start": _int(raw_source.get("start"), 0, 0, 10**7),
-                  "regen": bool(raw_source.get("regen")), "strength": _float(raw_source.get("strength"), 1.0, 0.05, 1.0), **_privacy(raw_source)}
+                  "regen": bool(raw_source.get("regen")), "strength": _float(raw_source.get("strength"), 1.0, 0.05, 1.0), "reference": False, **_privacy(raw_source)}
         if source["media"] is None:
             raise ValueError(f"第 {index + 1} 镜是源视频镜头，但还没有选择源视频。")
     audio = raw.get("audio") if raw.get("audio") in AUDIO_MODES else ("source" if kind == "source" else "generate")
@@ -247,6 +250,63 @@ def _layer(raw, layer_id, legacy_detail):
     return layer if layer["mask"] or layer["target"] or layer["box"] else None
 
 
+def swap_prompt(what, into, has_picture, track):
+    """替换模式's prompt in the six sections of h3-prompt-writing/references/ref-en.txt. It describes the result: on H3 "把 A 换成
+    B" either copies <Video 1> or loses its framing, depending on the seed. Inside a tracked mask it must not name A at
+    all, or H3 paints A back from <Video 1>."""
+    found = re.search(r"<Picture \d+>", into)
+    picture = found[0] if found else "<Picture 1>" if has_picture else ""
+    into = re.sub(r"<Picture \d+>\s*(里的)?\s*", "", into).strip() or ("person" if picture else "")
+    if not what or not into:
+        return ""
+    what = "figure" if track else what
+    source = f" in {picture}" if picture else ""
+    look = f"whose appearance comes from {picture} and " if picture else ""
+    traits = f"the face, hair and clothing of {picture} are" if picture else "this look is"
+    return f"""subject_definitions:
+<Subject 1> is the {into}{source}, {look}whose position, pose, movement and timing come from the {what} in <Video 1>.
+<Video 1> is the source video for the target video edit.
+
+summary:
+[video editing] The target video is an edited version of <Video 1>. <Subject 1> takes the place of the {what}; the camera, the background, every other person and the timing stay as they are in <Video 1>.
+
+retention_analysis:
+<Subject 1> (appears in [Shot 1]): attribute_transfer - {traits} transferred onto the {what} of <Video 1>, who no longer looks like the original person.
+<Video 1> (edit source): partially_preserved - the composition, camera movement, background, other people and timing are retained; only the {what} changes.
+
+detailed_description:
+The target video keeps the visual style, lighting and color of <Video 1>.
+[Shot 1] <Subject 1>, the {into}, is exactly where the {what} is in <Video 1>, at the same size in the frame, and performs the same movements with the same timing. The camera movement, the background and every other person match <Video 1> frame by frame.
+
+overall_soundscape:
+The ambience and physical sounds of <Video 1> continue.
+
+non_diegetic_music:
+N/A"""
+
+
+def _apply_swap(project, swap):
+    """Every 替换 shot takes the template at full strength. A tracked one keeps the source's pixels outside a SAM 3 mask of
+    what is replaced, with the source still as <Video 1>: the mask alone tells H3 nothing about the motion inside it."""
+    what = swap["what"].strip()
+    prompt = swap_prompt(what, swap["into"].strip(), bool(project["refs"]["images"]), swap["track"])
+    for shot in project["shots"]:
+        if shot["kind"] != "source" or not shot["source"]["regen"]:
+            continue
+        shot["prompt"] = prompt
+        shot["source"]["strength"] = 1.0
+        if swap["track"]:
+            shot["source"].update(regen=False, reference=True)
+            # At full strength H3 mostly paints the source's own subject back into the mask.
+            shot["ref_strength"] = 0.7
+            # The rewrite model names what each shot tracks; a blank field has to reach it as a layer all the same.
+            target = what or ("person" if project["rewrite"]["enabled"] and shot["rewrite"] else "")
+            layer = _layer({"source": "text", "target": target, "objects": swap["objects"], "grow": 24}, f"{shot['id']}-swap", False)
+            shot["repaints"] = ([layer] if layer else []) + shot["repaints"]
+            for number, item in enumerate(shot["repaints"] + shot["details"], 1):
+                item["number"] = number
+
+
 def load_project(text, settings=None):
     """The editor's project JSON plus the node's render ``settings`` (widget values, see SETTINGS)."""
     try:
@@ -257,6 +317,9 @@ def load_project(text, settings=None):
         raise ValueError("导演台工程数据必须是 JSON 对象。")
     s = {**SETTINGS, **(settings or {})}
     rewrite = {**DEFAULT_PROJECT["rewrite"], **(data.get("rewrite") or {})}
+    swap = {**DEFAULT_PROJECT["swap"], **(data.get("swap") or {})}
+    swap = {"enabled": bool(swap["enabled"]), "what": str(swap["what"] or ""), "into": str(swap["into"] or ""), "track": bool(swap["track"]),
+            "objects": _int(swap["objects"], 1, 0, 64)}
     project = {
         "width": _int(s["width"], 832, 64, 4096) // 32 * 32,
         "height": _int(s["height"], 480, 64, 4096) // 32 * 32,
@@ -267,6 +330,7 @@ def load_project(text, settings=None):
         "refs": _refs(data.get("refs")),
         "story": str(data.get("story") or ""),
         "rewrite": {"enabled": bool(rewrite["enabled"]), "notes": str(rewrite["notes"] or ""), "seed": _int(rewrite["seed"], 0, 0, 2**31)},
+        "swap": swap,
         # 二采 passes, either or both; each lifts the canvas before it by its own scale.
         "refine": {"two_pass": {"scale": _float(s["two_pass_scale"], 2.0, 1.0, 4.0), "steps": _int(s["two_pass_steps"], 2, 1, 200),
                                 **_upscaler(s, "two_pass")} if s["two_pass"] else None,
@@ -298,13 +362,16 @@ def load_project(text, settings=None):
     if not s["detail"]:
         for shot in project["shots"]:
             shot["details"] = []
-    for shot in project["shots"]:
-        kept = shot["kind"] == "source" and not shot["source"]["regen"]
-        # A shot without a prompt uses the global one, unless the rewrite model writes it from there. A kept source
-        # with nothing to repaint has no use for a prompt: its cached frames must not follow the global one.
-        if shot["inherit_prompt"] and not shot["prompt"].strip() and not (project["rewrite"]["enabled"] and shot["rewrite"] and not kept) \
-                and not (kept and not shot["repaints"] and not shot["details"]):
-            shot["prompt"] = project["story"]
+    if swap["enabled"]:
+        _apply_swap(project, swap)
+    else:
+        for shot in project["shots"]:
+            kept = shot["kind"] == "source" and not shot["source"]["regen"]
+            # A shot without a prompt uses the global one, unless the rewrite model writes it from there. A kept source
+            # with nothing to repaint has no use for a prompt: its cached frames must not follow the global one.
+            if shot["inherit_prompt"] and not shot["prompt"].strip() and not (project["rewrite"]["enabled"] and shot["rewrite"] and not kept) \
+                    and not (kept and not shot["repaints"] and not shot["details"]):
+                shot["prompt"] = project["story"]
     # The editor's 预览 runs one layer's mask instead of the film.
     preview = data.get("mask_preview")
     project["preview"] = {"layer": str(preview["layer"])} if isinstance(preview, dict) and preview.get("layer") else None

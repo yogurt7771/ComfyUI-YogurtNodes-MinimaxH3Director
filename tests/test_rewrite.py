@@ -242,6 +242,88 @@ class RewriteTests(unittest.TestCase):
             for (_, value), at in zip(frames, expected[key].values()):
                 self.assertAlmostEqual(value, 255 * at / 119, delta=4)
 
+    def swap_project(self, **swap):
+        write_video(Path(self.tmp.name) / "input" / "clip.mp4", 120, 128, 64)
+        media = {"filename": "clip.mp4", "subfolder": "", "type": "input"}
+        return director.project.load_project(json.dumps({
+            "rewrite": {"enabled": True}, "refs": {"images": [{"media": {"filename": "first.png", "subfolder": "", "type": "input"}}]}, "swap": {"enabled": True, **swap},
+            "shots": [{"id": "a", "kind": "source", "frames": 40, "source": {"media": media, "start": 0, "regen": True}, "continue": False},
+                      {"id": "b", "kind": "source", "frames": 40, "source": {"media": media, "start": 40, "regen": True}, "continue": False},
+                      {"id": "g", "frames": 24, "prompt": "生成的镜头"},
+                      {"id": "k", "kind": "source", "frames": 40, "source": {"media": media, "start": 80}}]}), SIZE)
+
+    SWAP_REPLY = ("===== SEGMENT 1 =====\nWHAT: 穿白衬衫的男人\nINTO: 老武士，黑袍\n===== END SEGMENT 1 =====\n"
+                  "===== SEGMENT 2 =====\nWHAT：背对镜头的男人\nINTO: 老武士，黑袍\n===== END SEGMENT 2 =====\n")
+
+    def test_swap_writes_only_what_becomes_what_from_a_few_frames(self):
+        self.model.replies = [AIMessage(content=self.SWAP_REPLY)]
+        events = []
+        project, prompts, report = self.run_rewrite(self.swap_project(what="那个男人"), lambda *event: events.append(event))
+        template = director.project.swap_prompt
+        self.assertEqual(prompts, {"a": template("穿白衬衫的男人", "老武士，黑袍", True, False), "b": template("背对镜头的男人", "老武士，黑袍", True, False)})
+        self.assertEqual([s["prompt"] for s in project["shots"]], [prompts["a"], prompts["b"], "生成的镜头", ""])
+        self.assertEqual(events[0], (0, "rewriting"))
+        self.assertEqual(events[1:], [(0, "rewritten", prompts["a"]), (1, "rewritten", prompts["b"])])
+        self.assertIn("第 1、2 镜", report[0])
+        system, human = self.model.seen[0]
+        self.assertIn("WHAT is the subject", system.content)
+        self.assertIn("The user says the subject to replace is: 那个男人", human.content[0]["text"])
+        self.assertNotIn("生成的镜头", human.content[0]["text"])
+        captions = [block["text"] for block in human.content[1:] if block["type"] == "text"]
+        self.assertTrue(captions[0].startswith("Global reference image 1"))
+        self.assertEqual([c for c in captions if c.startswith("Segment 2")], [f"Segment 2 at {at} s:" for at in ("0.00", "0.54", "1.08", "1.62")])
+        shown = dict(zip(captions, [brightness(block) for block in human.content[1:] if block["type"] == "image_url"]))
+        self.assertAlmostEqual(shown["Segment 2 at 0.00 s:"], 255 * 40 / 119, delta=4)
+
+    def test_swap_answers_come_from_the_cache(self):
+        self.model.replies = [AIMessage(content=self.SWAP_REPLY)]
+        project = self.swap_project()
+        self.run_rewrite(project)
+        _, prompts, report = self.run_rewrite(project)
+        self.assertEqual(len(self.model.seen), 1)
+        self.assertIn("老武士", prompts["b"])
+        self.assertEqual(report, ["改写读取缓存：第 1、2 镜"])
+
+    def test_tracked_swap_tracks_what_the_model_names(self):
+        reply = self.SWAP_REPLY.replace("穿白衬衫的男人", "man in white shirt").replace("背对镜头的男人", "man from behind")
+        self.model.replies = [AIMessage(content=reply)]
+        project, prompts, _ = self.run_rewrite(self.swap_project(track=True))
+        self.assertEqual([s["repaints"][0]["target"]["text"] for s in project["shots"][:2]], ["man in white shirt", "man from behind"])
+        self.assertEqual(prompts["a"], director.project.swap_prompt("man in white shirt", "老武士，黑袍", True, True))
+        self.assertNotIn("man in white shirt", prompts["a"])
+        self.assertIn("segmentation model", self.model.seen[0][1].content[0]["text"])
+
+    def test_swap_is_asked_again_for_what_it_left_out(self):
+        first, second = self.SWAP_REPLY.split("===== SEGMENT 2")
+        self.model.replies = [AIMessage(content=first), AIMessage(content="===== SEGMENT 2" + second)]
+        _, prompts, _ = self.run_rewrite(self.swap_project())
+        self.assertEqual(set(prompts), {"a", "b"})
+        self.assertNotIn("## Segment 1", self.model.seen[1][1].content[0]["text"])
+
+    def test_a_shot_without_the_subject_keeps_the_source(self):
+        reply = self.SWAP_REPLY.replace("WHAT：背对镜头的男人\nINTO: 老武士，黑袍", "WHAT: NONE")
+        for track, layers in ((False, 0), (True, 0)):
+            self.model.replies = [AIMessage(content=reply)]
+            project, prompts, report = self.run_rewrite(self.swap_project(track=track, objects=track + 1))
+            kept = project["shots"][1]
+            self.assertEqual((kept["source"]["regen"], kept["source"]["reference"], kept["prompt"], len(kept["repaints"])), (False, False, "", layers))
+            self.assertEqual(prompts["b"], rewrite.ABSENT_NOTE)
+            self.assertIn("第 2 镜画面里没有要换的对象，保留原画", report)
+            self.assertIn("老武士", prompts["a"])
+
+    def test_swap_brief_lists_a_picture_only_when_it_has_something_to_say(self):
+        self.model.replies = [AIMessage(content=self.SWAP_REPLY)]
+        self.run_rewrite(self.swap_project())
+        self.assertNotIn("<Picture 1>.", self.model.seen[0][1].content[0]["text"])
+
+    def test_swap_without_vision_keeps_the_fields(self):
+        project = self.swap_project(what="男人", into="武士")
+        written, prompts, report = rewrite.rewrite_project(project, {**CONFIG, "vision": False}, director.media.Media())
+        self.assertEqual(self.model.seen, [])
+        self.assertEqual(prompts, {})
+        self.assertEqual(written["shots"][0]["prompt"], project["shots"][0]["prompt"])
+        self.assertIn("vision", report[0])
+
     def test_agent_is_reminded_when_it_stops_early(self):
         plan = AIMessage(content="", tool_calls=[{"name": "write_file", "id": "w1", "args": {"file_path": "/plan.md", "content": "1. walk 2. turn 3. cafe"}}])
         read = AIMessage(content="", tool_calls=[{"name": "read_file", "id": "r2", "args": {"file_path": "/plan.md"}}])
@@ -293,6 +375,9 @@ if "The description:" in brief:
 wanted = [int(n) for n in re.findall(r"^## Segment (\d+) — id `[^`]+`$", brief, re.M)]
 if mode == "partial" and len(calls) == 1:
     wanted = wanted[:1]
+if "WHAT is the subject" in brief:
+    say("".join(f"===== SEGMENT {n} =====\nWHAT: 男人 {n}\nINTO: 武士\n===== END SEGMENT {n} =====\n" for n in wanted))
+    sys.exit(0)
 say("Narration before the answer." + "".join(f"===== SEGMENT {n} =====\n雨夜 prompt {n}\n===== END SEGMENT {n} =====\n" for n in wanted))
 """
 
@@ -370,6 +455,16 @@ class AgentTests(unittest.TestCase):
         self.assertEqual(len(self.calls()), 1)
         self.assertEqual(prompts["c"], "雨夜 prompt 3")
         self.assertIn("改写读取缓存", report[0])
+
+    def test_swap_fields_come_back_from_the_cli(self):
+        write_video(self.root / "input" / "clip.mp4", 48, 128, 64)
+        project = director.project.load_project(json.dumps({"rewrite": {"enabled": True}, "swap": {"enabled": True}, "shots": [
+            {"id": "a", "kind": "source", "frames": 40, "source": {"media": {"filename": "clip.mp4", "subfolder": "", "type": "input"}, "regen": True}}]}), SIZE)
+        _, prompts, _ = rewrite.rewrite_project(project, self.config(), director.media.Media())
+        self.assertIn("<Subject 1> is the 武士, whose position, pose, movement and timing come from the 男人 1 in <Video 1>.", prompts["a"])
+        call = self.calls()[0]
+        self.assertNotIn("skills/h3-prompt-writing/SKILL.md", call["files"])
+        self.assertEqual(len([f for f in call["files"] if f.endswith(".jpg")]), 4)
 
     def test_vision_off_sends_no_images(self):
         self.run_rewrite(self.config(vision=False))

@@ -10,6 +10,7 @@ import base64
 import copy
 from io import BytesIO
 from pathlib import Path
+import re
 
 from PIL import Image
 
@@ -19,9 +20,13 @@ from comfy_api.latest import io
 from . import cache
 from .agents import AGENTS, Rewriter, answers, run_agent
 from .cache import digest
-from .project import FPS, plan_windows
+from .project import FPS, plan_windows, swap_prompt
 
 VERSION = "rewrite-3"
+SWAP_VERSION = "swap-4"
+SWAP_FRAMES = 4
+ABSENT = "NONE"
+ABSENT_NOTE = "画面里没有要换的对象，这一镜保留原画。"
 SKILL = Path(__file__).resolve().parent / "h3-prompt-writing"
 PROVIDERS = ("openai", "anthropic", "ollama")
 REMINDERS = 2
@@ -78,6 +83,31 @@ in the timeline:
 
 ===== SEGMENT N =====
 the complete H3 prompt
+===== END SEGMENT N ====="""
+
+
+SWAP_WRITER = """One subject of a video is being replaced with MiniMax H3. H3 takes the motion, camera and scene from \
+the video by itself, and a fixed text tells it to. For each segment you fill in only two short fields, from that \
+segment's frames and the reference pictures:
+
+WHAT is the subject to replace as it looks in this segment: clothing, hair or position, enough to tell it from anyone \
+else on screen. Example of the form: `girl in a red dress`.
+INTO is who the new subject is and how they look: a noun first, then face, hair and clothing, read off the reference \
+picture. Word it the same in every segment. Example of the form: `silver-haired elf with a green cloak and tall boots`.
+
+It is one subject through the whole film. If the user names it, keep to it, fitting their words to what the frames \
+show. If they do not, choose the person on screen most like the reference picture in kind (gender, age, build), and if \
+that does not settle it, the most prominent one. When a segment's frames do not show that subject, write \
+`WHAT: NONE` for that segment instead of picking someone else: the segment then stays as it is. Keep the user's choice \
+of what it becomes. Never write actions, camera, scene or timing. Both fields are in lowercase English, with no leading \
+article and at most 15 words. With one reference picture INTO has no label; with several, start it with the label of \
+the one to use. Some media are withheld from you for privacy: write about them only what the user's description says.
+
+Answer in exactly this form, N being the segment's number:
+
+===== SEGMENT N =====
+WHAT: ...
+INTO: ...
 ===== END SEGMENT N ====="""
 
 
@@ -258,13 +288,14 @@ def _image_block(image, caption):
             {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64," + base64.b64encode(buffer.getvalue()).decode()}}]
 
 
-def _video_blocks(media, item, start, count, caption):
-    """What a video shows over the ``count`` frames a segment takes from it: one frame a second with its time, and the last."""
+def _video_blocks(media, item, start, count, caption, moments=None):
+    """What a video shows over the ``count`` frames a segment takes from it: ``moments``, by default one frame a second
+    and the last, each with its time."""
     width, height = media.video_size(item)
     scale = 512 / max(width, height)
     frames = media.video(item, start, count, max(2, round(width * scale)), max(2, round(height * scale)), "disabled")
     blocks = []
-    for at in sorted({*range(0, count, FPS), count - 1}):
+    for at in sorted(moments or {*range(0, count, FPS), count - 1}):
         blocks += _image_block(frames[at:at + 1], f"{caption} at {_seconds(at)} s:")
     return blocks
 
@@ -331,11 +362,129 @@ def _segment_key(window, project, config, skill, media, previous):
                    [_identity(media, m) for m in items], window.head, window.gen, window.carry, previous])
 
 
+def _replaced(shot):
+    return shot["rewrite"] and shot["source"] is not None and (shot["source"]["regen"] or shot["source"]["reference"])
+
+
+def _swap_key(window, project, config, media):
+    source, model = window.shot["source"], {k: v for k, v in config.items() if k != "api_key"}
+    swap, rewrite = project["swap"], project["rewrite"]
+    # What the model could see is part of the key: the editor's 只改写 has no connected sockets, a render does.
+    pictures = [[_identity(media, m["media"]), m["share"] and _visible(media, m["media"]), m["description"]] for m in window.shot["refs"]["images"]]
+    return digest([SWAP_VERSION, model, swap["what"], swap["into"], swap["track"], rewrite["notes"], rewrite["seed"], pictures, window.shot["frames"],
+                   _identity(media, source["media"]), source["start"], source["share"] and _visible(media, source["media"]), source["description"]])
+
+
+def _swap_content(project, targets, media):
+    swap, notes = project["swap"], project["rewrite"]["notes"].strip()
+    text = [f"The user says the subject to replace is: {swap['what'].strip() or '(not said)'}",
+            f"The user says it becomes: {swap['into'].strip() or '(not said)'}",
+            *(["WHAT is also what a segmentation model (SAM 3) selects it by, so keep it to a noun phrase of at most 6 words."] if swap["track"] else [])]
+    if notes:
+        text.append(f"The user also asks: {notes}")
+    text += [f"<Picture {i}>{_withheld(m)}." for i, m in enumerate(project["refs"]["images"], 1) if _withheld(m)]
+    blocks = global_attachments(project, targets, media)
+    for window in targets:
+        shot, number = window.shot, window.index + 1
+        source, count = shot["source"], shot["frames"]
+        seen = source["share"] and _visible(media, source["media"])
+        text.append(f"## Segment {number} — id `{shot['id']}`\n{_seconds(count)} s of the video{_withheld(source)}"
+                    f"{'' if seen or not source['share'] else '; its frames cannot be shown here: rely on what the user says'}.")
+        shared = shot["global_refs"]["images"]
+        for i, entry in enumerate(shot["refs"]["images"][shared:], shared + 1):
+            text.append(f"<Picture {i}> (segment {number} only){_withheld(entry)}.")
+            if entry["share"] and _visible(media, entry["media"]):
+                blocks += _image_block(media.image(entry["media"]), f"Segment {number} <Picture {i}>:")
+        if seen:
+            blocks += _video_blocks(media, source["media"], source["start"], count, f"Segment {number}",
+                                    {(count - 1) * k // (SWAP_FRAMES - 1) for k in range(SWAP_FRAMES)})
+    return [{"type": "text", "text": "\n\n".join(text)}] + blocks
+
+
+def _swap_fields(answer):
+    fields = dict(re.findall(r"^\s*(WHAT|INTO)\s*[:：]\s*(.+?)\s*$", answer, re.M))
+    return {"what": fields.get("WHAT", ""), "into": fields.get("INTO", "")}
+
+
+def _write_swaps(project, targets, config, media):
+    written, missing, reply = {}, targets, ""
+    for _ in range(REMINDERS + 1):
+        content = _swap_content(project, missing, media)
+        if config["provider"] in AGENTS:
+            text, images = _agent_brief(content)
+            reply = run_agent(config, f"{SWAP_WRITER}\n\nImages mentioned below are files in the current folder: open them to see them.\n\n{text}", images)
+        else:
+            from langchain_core.messages import HumanMessage, SystemMessage
+
+            reply = str(chat_model(config).invoke([SystemMessage(SWAP_WRITER), HumanMessage(content=content)]).text)
+        found = answers(reply)
+        for window in missing:
+            fields = _swap_fields(found.get(window.index + 1, ""))
+            if fields["what"] and (fields["into"] or fields["what"] == ABSENT):
+                written[window.shot["id"]] = fields
+        missing = [w for w in missing if w.shot["id"] not in written]
+        if not missing:
+            return written
+    raise RuntimeError(f"{config['provider']} 没有交回第 {'、'.join(str(w.index + 1) for w in missing)} 镜的替换描述（已重试 {REMINDERS} 次）。"
+                       + (f"它最后的回复：{reply.strip()[-300:]}" if reply.strip() else "它没有任何输出。"))
+
+
+def _keep_source(shot):
+    """A shot without the subject stays as the video has it, instead of H3 replacing whoever else is on screen."""
+    shot["source"].update(regen=False, reference=False)
+    shot["prompt"] = ""
+    shot["repaints"] = [layer for layer in shot["repaints"] if layer["id"] != f"{shot['id']}-swap"]
+
+
+def _rewrite_swaps(project, config, media, event):
+    """替换模式: the model only names what each 替换 shot replaces with what, from a few of its frames and the reference
+    pictures. The rest stays the measured template, since a long description overrides the source video."""
+    if not config["vision"]:
+        return project, {}, ["改写模型没开 vision，看不到画面：替换用“把什么”和“换成”里写的内容。"]
+    windows = [w for w in plan_windows(project) if _replaced(w.shot)]
+    fields, targets = {}, []
+    for window in windows:
+        key = _swap_key(window, project, config, media)
+        if cache.exists(key, ".json"):
+            fields[window.shot["id"]] = cache.read_json(key)
+        else:
+            targets.append(window)
+    report = []
+    if targets:
+        if event:
+            event(targets[0].index, "rewriting")
+        written = _write_swaps(project, targets, config, media)
+        for window in targets:
+            cache.write_json(_swap_key(window, project, config, media), written[window.shot["id"]])
+        fields.update(written)
+        report.append(f"改写：第 {'、'.join(str(w.index + 1) for w in targets)} 镜（{config['provider']}:{config['model'] or '默认模型'}）")
+    cached = [w.index + 1 for w in windows if w not in targets]
+    if cached:
+        report.append(f"改写读取缓存：第 {'、'.join(map(str, cached))} 镜")
+    rewritten, prompts = copy.deepcopy(project), {}
+    for window in windows:
+        shot = next(s for s in rewritten["shots"] if s["id"] == window.shot["id"])
+        what, into = fields[shot["id"]]["what"], fields[shot["id"]]["into"]
+        if what == ABSENT:
+            _keep_source(shot)
+            prompts[shot["id"]] = ABSENT_NOTE
+            report.append(f"第 {window.index + 1} 镜画面里没有要换的对象，保留原画")
+        else:
+            prompts[shot["id"]] = shot["prompt"] = swap_prompt(what, into, bool(project["refs"]["images"]), project["swap"]["track"])
+            if project["swap"]["track"]:
+                shot["repaints"][0]["target"]["text"] = what
+        if event:
+            event(window.index, "rewritten", prompts[shot["id"]])
+    return rewritten, prompts, report
+
+
 def rewrite_project(project, config, media, event=None):
     """(project with rewritten prompts, {shot id: prompt}, report lines). Only uncached segments call the model.
 
     ``event(index, stage, prompt=None)`` reports progress; every cached or newly written prompt is reported
     as stage "rewritten" as soon as it is known, before rendering starts."""
+    if project["swap"]["enabled"]:
+        return _rewrite_swaps(project, config, media, event)
     windows = plan_windows(project)
     skill = skill_files()
     skill_id = digest(skill)

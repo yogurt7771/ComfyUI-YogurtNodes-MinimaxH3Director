@@ -3,7 +3,7 @@ import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
 import {
     FPS, NODE, PHASES, STAGES, applyMode, blockLabel, changed, clamp, effectiveRefs, filmSize, h, mediaLabel, mediaPreview, modeSwitch, newShot, ownPrompt, planWindows,
-    readInputs, readProject, rewritable, runPlan, samples, secs, shotMode, storePrompts, totalFrames, widget, writeProject,
+    readInputs, readProject, rewritable, runPlan, samples, secs, shotMode, storePrompts, swapPrompt, totalFrames, widget, writeProject,
 } from "./core.js";
 import { openEditor } from "./editor.js";
 
@@ -40,6 +40,7 @@ class Panel {
                 writeProject(node, project);
             },
         });
+        this.storyLabel = h("span");
         this.promptLabel = h("span");
         this.result = h("div.result");
         this.plan = h("div.plan");
@@ -54,7 +55,7 @@ class Panel {
         this.root = h("div.yh3.yh3-panel", {},
             h("header", {}, h("strong", {}, "H3 导演台"), this.meta, h("button.primary", { onclick: () => this.open() }, "打开导演台")),
             this.strip, this.runbox, this.quick, this.refs,
-            h("label.field.storyf", {}, h("span", {}, "全局提示词"), this.story),
+            h("label.field.storyf", {}, this.storyLabel, this.story),
             h("label.field", {}, this.promptLabel, this.prompt), this.result, this.plan,
             h("div.row", {}, this.status, h("span.grow"),
                 h("button", { onclick: () => this.addShot() }, "+ 镜头"),
@@ -269,7 +270,7 @@ class Panel {
             },
         });
         this.quick.replaceChildren(h("b", {}, `第 ${this.selected + 1} 镜`),
-            shot.still ? h("span.dim", {}, "封面") : modeSwitch(shot, mode => {
+            shot.still ? h("span.dim", {}, "封面") : modeSwitch(project, shot, mode => {
                 const p = readProject(this.node);
                 applyMode(p.shots[this.selected], mode);
                 writeProject(this.node, p);
@@ -278,15 +279,20 @@ class Panel {
             h("label.row", {}, "时长", seconds, "秒"), h("label.row", {}, carry, "续接上一镜"),
             h("span.dim", {}, `输出 ${w.keep} 帧`));
         this.renderRefs(project, shot);
-        if (document.activeElement !== this.story) this.story.value = project.story;
-        this.story.placeholder = project.rewrite.enabled ? "整部片的剧情、人物、风格和场景；改写模型据此写每一镜。"
+        const swapping = project.swap.enabled, replaced = swapping && shotMode(shot) === "rewrite";
+        this.storyLabel.textContent = swapping ? "替换提示词（在导演台“提示词”页改）" : "全局提示词";
+        this.story.disabled = swapping;
+        if (document.activeElement !== this.story) this.story.value = swapping ? swapPrompt(project) : project.story;
+        this.story.placeholder = swapping ? (project.rewrite.enabled ? "每一镜由 AI 看画面写。" : "在导演台“提示词”页写把什么换成什么。")
+            : project.rewrite.enabled ? "整部片的剧情、人物、风格和场景；改写模型据此写每一镜。"
             : "没写提示词的镜头直接用这里的内容。";
-        if (document.activeElement !== this.prompt) this.prompt.value = shot.prompt;
+        if (document.activeElement !== this.prompt) this.prompt.value = replaced ? "" : shot.prompt;
         const auto = rewritable(project, shot), idle = !samples(shot);
         this.promptLabel.textContent = `第 ${this.selected + 1} 镜提示词`;
-        this.prompt.disabled = idle;
-        this.prompt.placeholder = idle ? "这一镜直接用源视频，不生成，提示词不起作用。要让 H3 重画这段，选“整体改写”。"
-            : auto ? "这一镜的要点，可留空：改写模型按全局提示词写" : "这一镜的提示词，留空则用全局提示词";
+        this.prompt.disabled = idle || replaced;
+        this.prompt.placeholder = idle ? `这一镜直接用源视频，不生成，提示词不起作用。要让 H3 重画这段，选“${swapping ? "替换" : "整体改写"}”。`
+            : replaced ? "这一镜用上面的替换提示词。"
+                : auto ? "这一镜的要点，可留空：改写模型按全局提示词写" : swapping ? "这一镜的提示词" : "这一镜的提示词，留空则用全局提示词";
         this.result.hidden = !auto;
         this.result.replaceChildren(h("b", {}, "改写结果　"), prompts[shot.id] || "（运行，或在导演台“提示词”页点“只改写”后显示）");
         const plan = runPlan(project);
@@ -417,9 +423,9 @@ app.registerExtension({
                 if (panel) {
                     // The preview's progress marked its shot as busy; only a finished render keeps a mark.
                     for (const [id, state] of Object.entries(panel.states)) if (state !== "complete") delete panel.states[id];
-                    panel.say("识别预览完成，结果在“局部重绘”页。");
+                    panel.say("识别预览完成。");
                     panel.refresh();
-                    if (panel.editor?.root?.isConnected && panel.editor.tab === "repaint") panel.editor.renderInspector();
+                    if (panel.editor?.root?.isConnected) panel.editor.renderInspector();
                 }
             }
             const inputs = message?.yogurt_h3_inputs?.[0];

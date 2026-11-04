@@ -3,8 +3,8 @@ import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
 import {
     FPS, SHARED, STAGES, applyMode, blockLabel, canvasChain, changed, clamp, clone, effectiveRefs, filmSize, follows, graphInputs, h, inputPreview, mediaLabel, mediaPreview, mediaUrl,
-    modeSwitch, ownPrompt, queueAlone, readInputs, refCount, newLayer, newShot, pickFile, planWindows, previewRewrite, projectData, readProject, rewritable, rewriterConfig,
-    runPlan, samples, secs, shotMode, sourceFile, storePrompts, totalFrames, uid, upload, widget, writeProject,
+    modeNames, modeSwitch, ownPrompt, queueAlone, readInputs, refCount, newLayer, newShot, pickFile, planWindows, previewRewrite, projectData, readProject, rewritable, rewriterConfig,
+    runPlan, samples, secs, shotMode, sourceFile, storePrompts, swapPrompt, swapSummary, totalFrames, uid, upload, widget, writeProject,
 } from "./core.js";
 import { Painter } from "./painter.js";
 
@@ -889,29 +889,63 @@ class Editor {
 
     /** All the prompts of the film on one page, each next to the choice that decides whether it is used. */
     promptsPane() {
-        const p = this.project, config = rewriterConfig(this.node), rewriting = p.rewrite.enabled;
+        const p = this.project, config = rewriterConfig(this.node), rewriting = p.rewrite.enabled, swapping = p.swap.enabled;
         const sources = p.shots.filter(s => s.kind === "source" && !s.still);
         const rewrites = p.shots.some(s => shotMode(s) === "rewrite");
         const shared = newShot(rewrites ? "source" : "generate");
         if (rewrites) shared.source.regen = true;
         const [story, storyTags] = this.promptBox(p, "story", this.tags(shared), { placeholder: rewriting
             ? "整部片的剧情、人物、风格和场景。例如：雨夜，穿红雨衣的女孩走在霓虹街头，回头一笑，走进咖啡馆。"
-            : "例如：Replace only the man in the white shirt in <Video 1> with the character in <Picture 1>; inherit his movement frame by frame; keep everything else." });
+            : "例如：雨夜，穿红雨衣的女孩走在霓虹街头，回头一笑，走进咖啡馆。换人或换物选上面的“替换”。" });
         const images = p.refs.images;
         this.rows = this.windows.map(w => this.promptRow(w));
         return [
             h("div.globals", {},
-                this.field(rewriting ? "全局提示词：改写模型据此写每一镜" : "全局提示词：没写提示词的镜头直接用它", story, storyTags),
+                this.field("提示词怎么来", this.seg([[false, "自己写"], [true, "替换"]], swapping, v => this.setSwap(v))),
+                swapping ? this.swapControls() : this.field(rewriting ? "全局提示词：改写模型据此写每一镜" : "全局提示词：没写提示词的镜头直接用它", story, storyTags),
                 h("div.field", {}, h("span", {}, "全局参考图：每一镜都带上"),
                     h("div.slots.thumbs", {},
                         ...images.map((m, i) => this.slot(m.media, { tag: `<Picture ${i + 1}>`, onpick: v => { v ? (m.media = v) : images.splice(i, 1); this.commit(true); } })),
                         this.slot(null, { onpick: m => { if (m) { images.push({ media: m, fit: "auto", ...SHARED }); this.commit(true); } } }))),
                 this.rewriteControls(config)),
             sources.length > 1 ? h("div.row", {}, h("span.grow"), h("span.dim", {}, `${sources.length} 个源视频镜头全部设为`),
-                h("button", { onclick: () => this.setAllSources("rewrite") }, "整体改写"),
+                h("button", { onclick: () => this.setAllSources("rewrite") }, modeNames(p).rewrite),
                 h("button", { onclick: () => this.setAllSources("keep") }, "保留原画")) : null,
             h("div.shots", {}, ...this.rows),
             this.result?.report?.length ? [h("b", {}, "上次运行"), h("div.report", {}, this.result.report.join("\n"))] : null,
+        ];
+    }
+
+    /** 替换模式: only what to replace with what. The prompt, the full strength and the rewrite being off follow from it. */
+    swapControls() {
+        const p = this.project, swap = p.swap, node = this.node, images = p.refs.images, rewriting = p.rewrite.enabled;
+        const linked = name => node.inputs?.some(i => i.name === name && i.link != null);
+        const sentence = h("div.dim"), hint = h("div.field");
+        const show = () => {
+            const full = swapPrompt(p), open = sentence.querySelector("details")?.open;
+            sentence.replaceChildren(rewriting ? "AI 看每一镜的几帧画面和参考图，写好这两项再套进官方格式的模板，结果显示在下面每一镜里。"
+                : full ? h("details", { open }, h("summary", {}, "发给 H3 的完整提示词"), h("div.report", {}, full)) : "写好上面两项后，这里显示发给 H3 的提示词。");
+            const what = swap.what.trim(), english = node.properties?.yh3Targets?.[what];
+            hint.replaceChildren(...(rewriting || !swap.track || !what || /^[\x00-\x7f]*$/.test(what) ? []
+                : [english ? h("div.dim", {}, `SAM 3 用：${english}`) : linked("rewriter") ? h("div.dim", {}, "运行或预览时由改写模型翻成英文。")
+                    : h("div.warn", {}, "SAM 3 只认英文：写英文，或接上改写模型自动翻译。")]));
+        };
+        show();
+        const text = (key, placeholder) => h("input", { type: "text", value: swap[key], placeholder, oninput: e => { swap[key] = e.target.value; show(); this.commit(); } });
+        const replaced = shotMode(this.shot) === "rewrite", layer = `${this.shot.id}-swap`, mask = node.properties?.yh3Masks?.[layer];
+        return [
+            this.field(rewriting ? "把什么（可留空，AI 看画面写；画面里有多个人时写上换谁）" : swap.track ? "把什么（SAM 3 追踪它，英文最准）" : "把什么", text("what", swap.track ? "man in white shirt" : "man in the white shirt")), hint,
+            this.field(rewriting ? "换成（可留空，AI 看下面的参考图写）" : "换成（写上外观更容易换掉，参考图在下面放）", text("into", images.length ? "elderly samurai with a black robe and a red sash" : "woman in a red dress with long black hair")),
+            images.length > 1 ? h("div.chips", {}, ...images.map((_, i) => h("button", { onclick: () => { swap.into = `<Picture ${i + 1}> ${swap.into.replace(/<Picture \d+>\s*(里的)?\s*/, "")}`; this.commit(true); } }, `<Picture ${i + 1}>`))) : null,
+            this.field("重画范围", this.seg([[false, "整个画面（推荐）"], [true, "只改追踪到的部分"]], swap.track, v => { swap.track = v; this.commit(true); })),
+            h("div.dim", {}, swap.track ? "其余像素和源视频完全一样，但换人不稳定：可能没换掉，或中途变回原来的人，换个种子再试。" : "H3 重画整个画面，背景和其他人会有细微变化；构图跑偏或没跟上动作时给那一镜换个种子。"),
+            linked("ref_model") ? null : h("div.warn", {}, "导演台的 ref_model 还没接：替换要接 ref2va。"),
+            swap.track && !(linked("sam3") && linked("sam3_clip")) ? h("div.warn", {},
+                "导演台的 sam3 / sam3_clip 还没接：用 CheckpointLoaderSimple 加载 sam3.1_multiplex_fp16.safetensors，MODEL 接 sam3、CLIP 接 sam3_clip。") : null,
+            swap.track ? h("div.row", {}, this.field("最多目标（0 不限）", this.number(swap, "objects", { min: 0, max: 64 })),
+                replaced && swap.what.trim() ? h("button", { onclick: () => this.previewMask({ id: layer }, "这一页") }, `识别预览第 ${this.selected + 1} 镜`) : null) : null,
+            swap.track && mask ? h("img.maskpreview", { src: mediaUrl(mask.image), onerror: e => e.target.remove() }) : null,
+            sentence,
         ];
     }
 
@@ -927,7 +961,7 @@ class Editor {
             if (again) p.rewrite.seed = (p.rewrite.seed || 0) + 1;
             this.commit();
             status.className = "dim";
-            status.textContent = "改写中…正在读 H3 写作指南并逐镜编写，通常需要几十秒到几分钟。";
+            status.textContent = p.swap.enabled ? "改写中…AI 正在看每一镜的画面和参考图。" : "改写中…正在读 H3 写作指南并逐镜编写，通常需要几十秒到几分钟。";
             try {
                 const data = await previewRewrite(this.node, p);
                 storePrompts(this.node, data.prompts, data.report);
@@ -937,10 +971,10 @@ class Editor {
                 status.textContent = error.message;
             }
         };
-        const [notes] = this.promptBox(p.rewrite, "notes", [], { placeholder: "全局要求，可留空。例如：写实电影感，镜头克制；台词用中文。" });
+        const [notes] = this.promptBox(p.rewrite, "notes", [], { placeholder: p.swap.enabled ? "给 AI 的要求，可留空。例如：只换穿白衬衫的男人，背景里的人不换。" : "全局要求，可留空。例如：写实电影感，镜头克制；台词用中文。" });
         return h("div.field", {}, h("div.row", {}, toggle, model),
             config ? null : h("div.warn", {}, "还没有接改写节点，运行会报错：接上“Yogurt H3 改写模型”或改写 Codex / Claude / Grok，或关掉自动改写。"),
-            targets ? null : h("div.warn", {}, "现在没有要改写的镜头：保留原画的镜头不走 H3。把下面的镜头切到“整体改写”或“生成”。"),
+            targets ? null : h("div.warn", {}, `现在没有要改写的镜头：保留原画的镜头不走 H3。把下面的镜头切到“${modeNames(p).rewrite}”${p.swap.enabled ? "" : "或“生成”"}。`),
             notes,
             h("div.row", {}, h("button.primary", { onclick: () => run(false), disabled: !config || !targets }, "只改写，不渲染"),
                 h("button", { onclick: () => run(true), disabled: !config || !targets, title: "换一个改写结果；所有自动改写的镜头都会重写" }, "全部重写")),
@@ -948,7 +982,7 @@ class Editor {
     }
 
     promptRow(w) {
-        const shot = w.shot, mode = shotMode(shot), auto = rewritable(this.project, shot), source = shot.kind === "source";
+        const shot = w.shot, mode = shotMode(shot), auto = rewritable(this.project, shot), source = shot.kind === "source", swapping = this.project.swap.enabled;
         const body = [], more = [];
         if (source && !shot.source.media) {
             body.push(this.slot(null, { accept: "video/*", graph: ["video", "image"], onpick: m => this.setSource(shot, m) }));
@@ -961,11 +995,14 @@ class Editor {
             const held = this.project.shots.findIndex(s => s.id === shot.still.shot);
             body.push(h("div.dim", {}, `封面：成片里显示第 ${held + 1} 镜第 ${shot.still.frame + 1} 帧的结果，不需要提示词。`));
         } else if (!samples(shot)) {
-            body.push(h("div.dim", {}, "这一镜直接用源视频，不生成，提示词不起作用。要让 H3 重画这段，选“整体改写”。"));
+            body.push(h("div.dim", {}, `这一镜直接用源视频，不生成，提示词不起作用。要让 H3 重画这段，选“${modeNames(this.project).rewrite}”。`));
+        } else if (swapping && mode === "rewrite") {
+            body.push(auto ? this.rewriteResult(shot) : h("div.dim", {}, "用上面的替换提示词。"));
+            more.push(h("div.row", {}, this.project.rewrite.enabled ? this.check(shot, "rewrite", "本镜自动改写", () => this.commit(true)) : null, h("span.grow"), this.reseed(shot)));
         } else {
             const [area, chips] = this.promptBox(shot, "prompt", this.tags(shot, w.head), { placeholder: mode === "keep" ? "遮罩区域的提示词；遮罩外保留原画"
                 : auto ? "这一镜的要点，可留空：改写模型按全局提示词写"
-                    : shot.inherit_prompt !== false ? "这一镜的提示词，留空则用全局提示词" : "这一镜的提示词" });
+                    : !swapping && shot.inherit_prompt !== false ? "这一镜的提示词，留空则用全局提示词" : "这一镜的提示词" });
             body.push(area);
             if (auto) body.push(this.rewriteResult(shot));
             more.push(chips);
@@ -974,7 +1011,7 @@ class Editor {
             if (mode !== "keep") {
                 more.push(h("div.row", {},
                     this.project.rewrite.enabled ? this.check(shot, "rewrite", "本镜自动改写", () => this.commit(true)) : null,
-                    this.check(shot, "inherit_prompt", "继承全局提示词", () => this.commit(true)), h("span.grow"), this.reseed(shot)));
+                    swapping ? null : this.check(shot, "inherit_prompt", "继承全局提示词", () => this.commit(true)), h("span.grow"), this.reseed(shot)));
             }
             shot.repaints.forEach((layer, i) => {
                 if (layer.enabled !== false) more.push(this.field(`重绘 ${i + 1} 的提示词`, this.promptBox(layer, "prompt", [], { placeholder: "留空沿用这一镜的提示词" })[0]));
@@ -982,15 +1019,26 @@ class Editor {
         }
         return h(`div.shot.${mode}${w.index === this.selected ? ".selected" : ""}`, { onpointerdown: () => this.pick(w.index), onfocusin: () => this.pick(w.index) },
             h("div.row", {}, h("b", {}, `第 ${w.index + 1} 镜`), h("span.dim", {}, `${secs(w.keep)}${w.carry ? "，续接上一镜" : ""}`), h("span.grow"),
-                shot.still ? null : modeSwitch(shot, m => this.setMode(shot, m))),
+                shot.still ? null : modeSwitch(this.project, shot, m => this.setMode(shot, m))),
             ...body, more.some(Boolean) ? h("div.more", {}, ...more) : null);
     }
 
     rewriteResult(shot) {
         const text = this.node.properties?.yh3Prompts?.[shot.id];
         if (!text) return h("div.dim", {}, "改写结果：运行或点“只改写”后显示");
-        return h("details", {}, h("summary", {}, `改写结果：${text.slice(0, 80)}`), h("div.report", {}, text),
-            h("button", { onclick: () => { shot.prompt = text; shot.rewrite = false; this.commit(true); } }, "采用为手写提示词"));
+        return h("details", {}, h("summary", {}, `改写结果：${this.project.swap.enabled ? swapSummary(text) : text.slice(0, 80)}`), h("div.report", {}, text),
+            this.project.swap.enabled ? null : h("button", { onclick: () => { shot.prompt = text; shot.rewrite = false; this.commit(true); } }, "采用为手写提示词"));
+    }
+
+    /** The first switch to 替换 takes the source shots, or the shots of a film without any, along with it. */
+    setSwap(enabled) {
+        const p = this.project;
+        p.swap.enabled = enabled;
+        if (enabled && !p.shots.some(s => shotMode(s) === "rewrite")) {
+            const sources = p.shots.filter(s => s.kind === "source" && !s.still);
+            for (const shot of sources.length ? sources : p.shots) applyMode(shot, "rewrite");
+        }
+        this.commit(true);
     }
 
     setMode(shot, mode) {
@@ -1021,7 +1069,7 @@ class Editor {
     shotPane() {
         const shot = this.shot, w = this.win, first = this.selected === 0;
         const parts = [];
-        parts.push(h("div.row", {}, h("b", {}, `第 ${this.selected + 1} 镜`), shot.still ? null : modeSwitch(shot, m => this.setMode(shot, m))));
+        parts.push(h("div.row", {}, h("b", {}, `第 ${this.selected + 1} 镜`), shot.still ? null : modeSwitch(this.project, shot, m => this.setMode(shot, m))));
         if (shot.kind === "source") {
             parts.push(this.field("源视频（24fps 时间轴，可为任意帧率）",
                 this.slot(shot.source.media, { accept: "video/*", graph: ["video", "image"], onpick: m => this.setSource(shot, m) }),
@@ -1171,10 +1219,10 @@ class Editor {
     }
 
     /** Queue the director alone with a mask preview request: it runs SAM 3 / face detection, never H3. */
-    async previewMask(layer) {
+    async previewMask(layer, page = "“局部重绘”页") {
         try {
             await queueAlone(this.node, { mask_preview: { layer: layer.id } });
-            this.panel.say("已加入队列：识别重绘层的遮罩，完成后在“局部重绘”页显示。");
+            this.panel.say(`已加入队列：识别遮罩，完成后在${page}显示。`);
         } catch (error) {
             alert(`识别预览没能开始：${error.message}`);
         }

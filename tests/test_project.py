@@ -39,6 +39,74 @@ class PromptTests(unittest.TestCase):
         self.assertEqual(self.prompts(kept, {**kept, "repaints": [self.LAYER]}, rewrite=True), ["", "全局"])
 
 
+class SwapTests(unittest.TestCase):
+    SOURCE = {"media": {"filename": "clip.mp4", "subfolder": "", "type": "input"}, "regen": True, "strength": 0.5}
+    PICTURE = {"images": [{"filename": "who.png"}]}
+
+    def swap(self, *shots, refs=None, **swap):
+        return build(*shots, story="全局", refs=refs or self.PICTURE, rewrite={"enabled": True},
+                     swap={"enabled": True, "what": "穿白衬衫的男人", **swap})
+
+    def test_a_replaced_shot_takes_the_template_at_full_strength(self):
+        loaded = self.swap({"id": "a", "kind": "source", "prompt": "旧提示词", "source": self.SOURCE})
+        shot = loaded["shots"][0]
+        self.assertEqual(shot["prompt"], project.swap_prompt("穿白衬衫的男人", "", True, False))
+        self.assertTrue(shot["prompt"].startswith("subject_definitions:\n<Subject 1> is the person in <Picture 1>, whose appearance comes from <Picture 1> and "))
+        self.assertIn("takes the place of the 穿白衬衫的男人;", shot["prompt"])
+        for section in ("summary:\n[video editing]", "retention_analysis:\n", "attribute_transfer", "detailed_description:\n", "overall_soundscape:\n", "non_diegetic_music:\nN/A"):
+            self.assertIn(section, shot["prompt"])
+        self.assertEqual((shot["source"]["regen"], shot["source"]["strength"], shot["repaints"]), (True, 1.0, []))
+
+    def test_it_switches_the_global_prompt_off(self):
+        loaded = self.swap({"prompt": ""}, {"prompt": "本镜"})
+        self.assertEqual([shot["prompt"] for shot in loaded["shots"]], ["", "本镜"])
+
+    def test_tracking_with_blank_fields_waits_for_the_rewrite_model(self):
+        source = {"kind": "source", "source": self.SOURCE}
+        self.assertEqual(self.swap(source, what="", track=True)["shots"][0]["repaints"][0]["target"]["text"], "person")
+        unwritten = build(source, refs=self.PICTURE, swap={"enabled": True, "what": "", "track": True})["shots"][0]
+        self.assertEqual(unwritten["repaints"], [])
+
+    def test_a_kept_shot_stays_as_it_is(self):
+        shot = self.swap({"kind": "source", "source": {**self.SOURCE, "regen": False}})["shots"][0]
+        self.assertEqual((shot["prompt"], shot["source"]["regen"], shot["source"]["reference"], shot["repaints"]), ("", False, False, []))
+
+    def test_tracked_keeps_the_pixels_and_shows_the_source_as_a_video(self):
+        shot = self.swap({"id": "a", "kind": "source", "source": self.SOURCE, "repaints": [{"source": "box", "box": [0, 0, 1, 1]}]}, what="man in white shirt", track=True, objects=2)["shots"][0]
+        self.assertEqual((shot["source"]["regen"], shot["source"]["reference"], shot["ref_strength"]), (False, True, 0.7))
+        first, second = shot["repaints"]
+        self.assertEqual((first["id"], first["target"], first["grow"], first["number"], second["number"]),
+                         ("a-swap", {"text": "man in white shirt", "threshold": 0.5, "objects": 2}, 24, 1, 2))
+        self.assertNotIn("man in white shirt", shot["prompt"])
+        self.assertIn("<Video 1>", shot["prompt"])
+
+    def test_tracked_without_a_picture_still_samples_with_the_reference_model(self):
+        shot = self.swap({"kind": "source", "source": self.SOURCE}, what="man", into="a robot", track=True, refs={"images": []})["shots"][0]
+        self.assertTrue(director.render.Render.uses_refs(shot))
+
+    def test_nothing_to_replace_with_leaves_no_prompt(self):
+        source = {"kind": "source", "source": self.SOURCE}
+        self.assertEqual(self.swap(source, refs={"images": []})["shots"][0]["prompt"], "")
+        self.assertEqual(self.swap(source, what="  ")["shots"][0]["prompt"], "")
+        self.assertIn("穿红裙的女人", self.swap(source, into="穿红裙的女人", refs={"images": []})["shots"][0]["prompt"])
+
+    def test_words_for_the_new_look_point_at_the_reference_picture(self):
+        self.assertIn("<Subject 1> is the samurai in <Picture 1>,", project.swap_prompt("man", "samurai", True, False))
+        for typed in ("<Picture 2> samurai", "<Picture 2> 里的samurai"):
+            tagged = project.swap_prompt("man", typed, True, False)
+            self.assertIn("<Subject 1> is the samurai in <Picture 2>, whose appearance comes from <Picture 2> and ", tagged)
+            self.assertIn("clothing of <Picture 2> are transferred", tagged)
+            self.assertNotIn("<Picture 1>", tagged)
+        words = project.swap_prompt("man", "samurai", False, False)
+        self.assertNotIn("<Picture", words)
+        self.assertIn("<Subject 1> is the samurai, whose position, pose", words)
+        self.assertIn("this look is transferred", words)
+
+    def test_off_changes_nothing(self):
+        loaded = build({"kind": "source", "source": self.SOURCE}, story="全局", swap={"enabled": False, "what": "x", "into": "y"})
+        self.assertEqual((loaded["shots"][0]["prompt"], loaded["shots"][0]["source"]["strength"]), ("全局", 0.5))
+
+
 class LayerTests(unittest.TestCase):
     def layers(self, *items):
         shot = build({"frames": 30, "repaints": list(items)})["shots"][0]

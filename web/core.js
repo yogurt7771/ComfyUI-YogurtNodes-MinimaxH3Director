@@ -40,6 +40,7 @@ export function newShot(kind = "generate") {
 export function newProject() {
     return {
         version: 1, soundtrack: null, refs: { images: [], videos: [], audios: [] }, story: "", rewrite: { enabled: false, notes: "", seed: 0 },
+        swap: { enabled: false, what: "", into: "", track: false, objects: 1 },
         shots: [newShot()],
     };
 }
@@ -70,7 +71,7 @@ function detailLayer({ follow, denoise, ...item }) {
 
 export function normalize(project) {
     const base = newProject();
-    const out = { ...base, ...project, rewrite: { ...base.rewrite, ...(project?.rewrite || {}) }, refs: refsOf(project?.refs) };
+    const out = { ...base, ...project, rewrite: { ...base.rewrite, ...(project?.rewrite || {}) }, swap: { ...base.swap, ...(project?.swap || {}) }, refs: refsOf(project?.refs) };
     out.shots = (project?.shots || []).map(({ details = [], ...shot }) => {
         const fresh = newShot(shot.kind === "source" ? "source" : "generate");
         return { ...fresh, ...shot, refs: refsOf(shot.refs), keyframes: (shot.keyframes || []).map(k => ({ fit: "auto", ...SHARED, ...k })),
@@ -173,10 +174,12 @@ export function graphInputs(node, ...kinds) {
 }
 
 /** Shots whose prompt the rewrite model writes (a kept-pixel source shot only uses its own repaint prompts). */
-export const rewritable = (project, shot) => project.rewrite.enabled && shot.rewrite !== false && !(shot.kind === "source" && !shot.source?.regen);
+export const rewritable = (project, shot) => project.rewrite.enabled && shot.rewrite !== false
+    && (project.swap.enabled ? shotMode(shot) === "rewrite" : !(shot.kind === "source" && !shot.source?.regen));
 
 /** How a shot gets its picture. Every view shows the same three names and colors. */
 export const MODES = { generate: "生成", keep: "保留原画", rewrite: "整体改写" };
+export const modeNames = project => (project.swap.enabled ? { ...MODES, rewrite: "替换" } : MODES);
 export const shotMode = shot => (shot.kind === "generate" ? "generate" : shot.source?.regen ? "rewrite" : "keep");
 
 /** A shot switched to 生成 keeps its source video, so a wrong click on the switch costs nothing. */
@@ -190,17 +193,57 @@ export function applyMode(shot, mode) {
     if (mode === "keep" && shot.audio === "generate") shot.audio = "source";
 }
 
-export function modeSwitch(shot, onpick) {
+export function modeSwitch(project, shot, onpick) {
     const current = shotMode(shot);
-    return h("div.seg.modes", {}, ...Object.entries(MODES).map(([mode, label]) =>
+    return h("div.seg.modes", {}, ...Object.entries(modeNames(project)).map(([mode, label]) =>
         h(`button.${mode}${mode === current ? ".on" : ""}`, { onclick: () => onpick(mode) }, label)));
 }
 
 /** A shot H3 samples: everything but a source kept as it is (its repaint layers still sample). */
 export const samples = shot => shotMode(shot) !== "keep" || shot.repaints.some(layer => layer.enabled !== false);
 
-/** The prompt of a shot the rewrite model does not write: its own, else the global one (project.load_project). */
-export const ownPrompt = (project, shot) => shot.prompt.trim() || (shot.inherit_prompt !== false ? project.story.trim() : "");
+/** 替换模式's prompt as project.swap_prompt writes it: "" until it says what to replace with what. */
+export function swapPrompt(project) {
+    const typed = project.swap.into.trim();
+    const picture = typed.match(/<Picture \d+>/)?.[0] || (project.refs.images.length ? "<Picture 1>" : "");
+    const into = typed.replace(/<Picture \d+>\s*(里的)?\s*/, "").trim() || (picture ? "person" : "");
+    if (!project.swap.what.trim() || !into) return "";
+    const what = project.swap.track ? "figure" : project.swap.what.trim();
+    const source = picture ? ` in ${picture}` : "", look = picture ? `whose appearance comes from ${picture} and ` : "";
+    const traits = picture ? `the face, hair and clothing of ${picture} are` : "this look is";
+    return `subject_definitions:
+<Subject 1> is the ${into}${source}, ${look}whose position, pose, movement and timing come from the ${what} in <Video 1>.
+<Video 1> is the source video for the target video edit.
+
+summary:
+[video editing] The target video is an edited version of <Video 1>. <Subject 1> takes the place of the ${what}; the camera, the background, every other person and the timing stay as they are in <Video 1>.
+
+retention_analysis:
+<Subject 1> (appears in [Shot 1]): attribute_transfer - ${traits} transferred onto the ${what} of <Video 1>, who no longer looks like the original person.
+<Video 1> (edit source): partially_preserved - the composition, camera movement, background, other people and timing are retained; only the ${what} changes.
+
+detailed_description:
+The target video keeps the visual style, lighting and color of <Video 1>.
+[Shot 1] <Subject 1>, the ${into}, is exactly where the ${what} is in <Video 1>, at the same size in the frame, and performs the same movements with the same timing. The camera movement, the background and every other person match <Video 1> frame by frame.
+
+overall_soundscape:
+The ambience and physical sounds of <Video 1> continue.
+
+non_diegetic_music:
+N/A`;
+}
+
+/** What a 替换 prompt replaces with what, for the one line a shot shows of it; other text stays as it is. */
+export function swapSummary(prompt) {
+    const into = prompt.match(/<Subject 1> is the (.+?)(?: in <Picture \d+>)?, whose /)?.[1], what = prompt.match(/takes the place of the (.+?);/)?.[1];
+    return !into ? prompt : what && what !== "figure" ? `${what} → ${into}` : into;
+}
+
+/** The prompt of a shot the rewrite model does not write: 替换模式's, its own, else the global one (project.load_project). */
+export function ownPrompt(project, shot) {
+    if (project.swap.enabled) return shotMode(shot) === "rewrite" ? swapPrompt(project) : shot.prompt.trim();
+    return shot.prompt.trim() || (shot.inherit_prompt !== false ? project.story.trim() : "");
+}
 
 /** What a run will do, next to the run buttons: a film that generates nothing should never be a surprise. */
 export function runPlan(project) {
@@ -208,7 +251,11 @@ export function runPlan(project) {
     if (!sampled.length) return { warn: true, text: "全片保留原画，运行不会改变画面" };
     const rewritten = sampled.filter(shot => rewritable(project, shot)).length;
     const empty = sampled.filter(shot => !rewritable(project, shot) && !ownPrompt(project, shot)).length;
-    const parts = [`将生成 ${sampled.length} 镜`, kept && `保留原画 ${kept} 镜`, rewritten && `自动改写 ${rewritten} 镜`, empty && `${empty} 镜没有提示词`];
+    const replaced = project.swap.enabled ? sampled.filter(shot => shotMode(shot) === "rewrite").length : 0;
+    if (!swapPrompt(project) && sampled.some(shot => project.swap.enabled && shotMode(shot) === "rewrite" && !rewritable(project, shot))) {
+        return { warn: true, text: "替换模式还没写把什么换成什么" };
+    }
+    const parts = [replaced && `将替换 ${replaced} 镜`, sampled.length > replaced && `将生成 ${sampled.length - replaced} 镜`, kept && `保留原画 ${kept} 镜`, rewritten && `自动改写 ${rewritten} 镜`, empty && `${empty} 镜没有提示词`];
     return { warn: empty > 0, text: parts.filter(Boolean).join("，") };
 }
 
@@ -396,7 +443,7 @@ export function features(shot, project) {
     return marks;
 }
 
-export const blockLabel = (shot, project) => [shot.still ? "封面" : MODES[shotMode(shot)], ...features(shot, project)].join(" ");
+export const blockLabel = (shot, project) => [shot.still ? "封面" : modeNames(project)[shotMode(shot)], ...features(shot, project)].join(" ");
 
 const css = `
 .yh3 { --yh3-bg:#16191d; --yh3-panel:#1f2328; --yh3-raise:#2a2f36; --yh3-line:#3a414b; --yh3-ink:#e8ecef; --yh3-dim:#9aa5b1;
